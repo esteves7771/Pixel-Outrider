@@ -272,6 +272,7 @@ const EPS = 2 * DPR;
       this.pos = {x:2*U, y:-6*U};
       this.size = {w:0.9*U, h:1.5*U};
       this.vel  = {x:0, y:0};
+      this.ladderDir = null; // 'up' or 'down' for link ladders
       this.hp=100; this.alive=true; this.score=0; this.dist=0; this.coins=0;
       this.fireCD=0; this.iframes=0; this.lives=3;
       this.onGround=false; this.coyote=0; this.jumpBuf=0; this.groundedOn=null;
@@ -291,28 +292,34 @@ const EPS = 2 * DPR;
 
       // Ladder handling (disable shoot/jump, lerp position)
       if (this.onLadder){
-        const L = this.onLadder;
-        this.ladderT += 0.02; // fixed duration climb
-        const t = Math.min(1, this.ladderT);
-        // Freeze physics
-        this.vel.x = this.vel.y = 0;
-        // Place along ladder
-        this.pos.x = L.x + L.w*0.3;
-        this.pos.y = L.y + (L.dir==='up' ? (1-t) : t) * L.h - this.size.h;
-        this.onGround = false; this.groundedOn=null;
+  const L = this.onLadder;
+  this.ladderT += 0.02; // climb speed
+  const t = Math.min(1, this.ladderT);
 
-        if (t>=1){
-          // Apply biome/altitude shift
-          altitude = clamp(altitude + (L.dir==='up'?+1:-1), TUNE.ALT_MIN, TUNE.ALT_MAX);
-          biome = altitude>0 ? 'sky' : altitude<0 ? 'depths' : 'ground';
-          rebuildBGs();
-          toast(biome==='sky'?'Sky Tier +1':'Depth Tier −1',1200);
-          this.onLadder=null; this.ladderT=0;
-          // Snap safe point
-          this.lastSafe = {x:this.pos.x, y:this.pos.y};
-        }
-        // No shooting/jumping on ladder
-      } else {
+  // freeze physics; place on ladder
+  this.vel.x = this.vel.y = 0;
+  this.pos.x = L.x + L.w*0.3;
+
+  const goingUp = (L.dir === 'up') || (L.dir === 'link' && this.ladderDir !== 'down');
+  const phase   = goingUp ? (1 - t) : t; // 1->0 when going up, 0->1 when down
+  this.pos.y = L.y + phase * L.h - this.size.h;
+
+  this.onGround = false; this.groundedOn = null;
+
+  if (t >= 1){
+    // Only tier-shift on 'up'/'down' ladders (old behavior)
+    if (L.dir === 'up' || L.dir === 'down'){
+      altitude = clamp(altitude + (L.dir === 'up' ? +1 : -1), TUNE.ALT_MIN, TUNE.ALT_MAX);
+      biome = altitude>0 ? 'sky' : altitude<0 ? 'depths' : 'ground';
+      rebuildBGs();
+      toast(biome==='sky' ? 'Sky Tier +1' : 'Depth Tier −1', 1200);
+    }
+    this.onLadder = null; this.ladderT = 0; this.ladderDir = null;
+    this.lastSafe = {x:this.pos.x, y:this.pos.y};
+  }
+} else {
+  // (rest of your movement code unchanged)
+
         // horizontal input
         if (keys.has('keya')||keys.has('arrowleft'))  this.vel.x -= TUNE.ACCEL*DPR;
         if (keys.has('keyd')||keys.has('arrowright')) this.vel.x += TUNE.ACCEL*DPR;
@@ -406,7 +413,7 @@ this.vel.x *= this.onGround
         // HP packs
         for (let i=hpPacks.length-1;i>=0;i--){
           const h=hpPacks[i];
-          if (this.rect().intersects(new Rect(h.x,h.y,h.w,h.h))){ this.hp=clamp(this.hp+25,0,100); hpPacks.splice(i,1); }
+          if (this.rect().intersects(new Rect(h.x,h.y,h.w,h.h))){ this.hp=clamp(this.hp+25,0,100); hpPacks.splice(i,1); sfxHeal(); }
         }
 
         // Coins (magnet + pickup)
@@ -420,7 +427,7 @@ this.vel.x *= this.onGround
           c.x += c.vx||0; c.y += c.vy||0; c.vx*=0.96; c.vy*=0.96;
           if (d < c.r + Math.min(this.size.w,this.size.h)*0.25){
             this.coins++; this.score += (this.scoreX2>0?2:1);
-            coins.splice(i,1);
+            coins.splice(i,1); sfxCoin();
           }
         }
 
@@ -658,6 +665,35 @@ function spawnCoin(x,y){
   coins.push({ x:x-0.28*U, y:y-0.28*U, r:0.28*U, vx:0, vy:0, t:0, spin:rand(0.08,0.12) });
 }  function addGem(x,y,kind){ gems.push({x,y,w:0.6*U,h:0.6*U,kind}); }
   function addLadder(x,y,h,dir){ ladders.push({x:x+0.2*U,y:y-h, w:0.4*U, h, dir}); lastLadderAt = player.dist/U; }
+  
+  // Add DK-style ladder between two overlapping platforms (no biome shift)
+function tryAddConnectLadder(lower){
+  // find a platform above that horizontally overlaps
+  let pick = null;
+  for (const up of platforms){
+    if (up === lower) continue;
+    if (up.y >= lower.y - 0.8*U) continue;       // must be above
+    const dy = lower.y - up.y;                    // ladder height
+    if (dy < 1.2*U || dy > 6.2*U) continue;       // sensible span
+
+    // overlap window where a ladder can sit
+    const L = Math.max(lower.x, up.x) + 0.1*U;
+    const R = Math.min(lower.x + lower.w, up.x + up.w) - 0.5*U;
+    if (R <= L) continue;
+
+    const x = rand(L, R);
+
+    // avoid traps and other ladders along the run
+    if (areaHasTrap(x, up.y, 0.6*U, dy)) continue;
+    if (ladders.some(Ld => Math.abs((Ld.x+Ld.w/2)-(x+0.2*U)) < 1.2*U &&
+                           Math.abs((Ld.y+Ld.h/2) - (up.y + dy/2)) < 1.2*U)) continue;
+
+    pick = {x, y: lower.y, h: dy};
+    break;
+  }
+  if (pick) addLadder(pick.x, pick.y, pick.h, 'link'); // 'link' = no biome change
+}
+
 
   function areaHasTrap(x,y,w,h){ for(const t of traps){ if (x<w+t.x+t.w && x+w>t.x && y<h+t.y+t.h && y+h>t.y) return true; } return false; }
 
@@ -847,6 +883,8 @@ function generateChunk(){
       // traps (biome-weighted)
       if (Math.random() < (biome === 'depths' ? 0.24 : 0.18)) addSpikes(plat.x + U*0.5, plat.y - 0.4*U, plat.w - U);
       if (Math.random() < (biome === 'depths' ? 0.20 : 0.10)) addFlame(plat.x + plat.w*rand(0.25,0.7), plat.y - U*1.2);
+      // Add a DK-style connecting ladder sometimes, or when verticals get tall
+if (Math.random() < 0.35) tryAddConnectLadder(plat);
 
       // ground enemies
       if (Math.random() < enemySpawnChance()){
@@ -1067,13 +1105,20 @@ function loop(t=0){
 
   // ladders: enter on overlap + input (W for up, S for down)
   for (const L of ladders){
-    const r = new Rect(L.x, L.y, L.w, L.h);
-    if (!player.onLadder && player.rect().intersects(r)){
-      if ((L.dir==='up' && input.up) || (L.dir==='down' && input.down)){
+  const r = new Rect(L.x, L.y, L.w, L.h);
+  if (!player.onLadder && player.rect().intersects(r)){
+    if (L.dir === 'link'){
+      if (input.up || input.down){
         player.onLadder = L; player.ladderT = 0;
+        player.ladderDir = input.down ? 'down' : 'up';
       }
+    } else if ((L.dir === 'up' && input.up) || (L.dir === 'down' && input.down)){
+      player.onLadder = L; player.ladderT = 0;
+      player.ladderDir = L.dir; // only used for animation direction
     }
   }
+}
+
 
   // cull offscreen / dead things
   for (let i=bullets.length-1;i>=0;i--) if (bullets[i].life<=0) bullets.splice(i,1);
