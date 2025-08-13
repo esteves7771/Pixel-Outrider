@@ -1313,75 +1313,82 @@ const FLAME_FRAMES = [
     }
   }
 
-  // ================== Music engine ==================
-  const musicBtn = document.getElementById('musicBtn');
-  const musicA = document.getElementById('music');
-  const musicB = new Audio(); musicB.loop = true; musicB.preload = 'auto';
-  let activeAudio = musicA, idleAudio = musicB;
-  let musicEnabled = true;
+          // ================== Music engine ==================
 
-  function currentTrackURLForAlt(alt){
-    const key = String(clamp(alt, -2, 2));
-    return MUSIC_BASE + TRACKS[key];
+      const musicBtn = document.getElementById('musicBtn');
+      const musicA   = document.getElementById('music');
+      const musicB   = new Audio(); musicB.loop = true; musicB.preload = 'auto';
+      let activeAudio = musicA, idleAudio = musicB;
+      let musicEnabled = true;
+
+      function currentTrackURLForAlt(alt){
+      const key = String(clamp(alt, TUNE.ALT_MIN, TUNE.ALT_MAX));
+        return MUSIC_BASE + TRACKS[key];
   }
-  async function crossfadeTo(url, immediate=false){
-    if (!musicEnabled) return;
-    const curr = activeAudio.currentSrc || '';
-    const same = (()=>{ try{ const pa=new URL(curr, location.href).pathname.split('/').pop(); const pb=new URL(url, location.href).pathname.split('/').pop(); return pa===pb; }catch{ return curr===url; }})();
-    if (curr && same) return;
 
-    idleAudio.src = url;
-    idleAudio.volume = 0.0;
+// --- Music crossfade (single, clean implementation) ---
+async function crossfadeTo(url, immediate = false){
+  if (!musicEnabled || !url) return;
 
-    let idlePlayable = true;
-    try { await idleAudio.play(); } catch (e) { idlePlayable = false; }
+  const curr = activeAudio.currentSrc || '';
+  // compare by filename to avoid origin differences
+  const same = (() => {
+    try {
+      const pa = new URL(curr, location.href).pathname.split('/').pop();
+      const pb = new URL(url,  location.href).pathname.split('/').pop();
+      return pa === pb;
+    } catch { return curr === url; }
+  })();
+  if (curr && same) return;
 
-    if (!idlePlayable) {
-      activeAudio.src = url; activeAudio.volume = 0.35; try{ await activeAudio.play(); }catch{}
-      return;
+  // prep idle player
+  idleAudio.src = url;
+  idleAudio.loop = true;
+  idleAudio.volume = 0.0;
+
+  // try to start the new one; if blocked, hard-swap
+  let idlePlayable = true;
+  try { await idleAudio.play(); } catch { idlePlayable = false; }
+  if (!idlePlayable){
+    activeAudio.src = url;
+    activeAudio.volume = 0.35;
+    try { await activeAudio.play(); } catch {}
+    return;
+  }
+
+  // crossfade
+  const FADE_MS  = immediate ? 0 : 1500;
+  const start    = performance.now();
+  const startVol = activeAudio.volume ?? 0.35;
+  const targetVol= 0.35;
+
+  function step(now){
+    const t = Math.min(1, (now - start) / FADE_MS || 1);
+    activeAudio.volume = startVol * (1 - t);
+    idleAudio.volume   = targetVol * t;
+    if (t < 1) requestAnimationFrame(step);
+    else {
+      activeAudio.pause();
+      const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp;
     }
+  }
+  requestAnimationFrame(step);
+}
 
-    const FADE_MS = immediate ? 0 : 1500;
-    const start = performance.now();
-    const startVol = activeAudio.volume ?? 0.35;
-    const targetVol = 0.35;
-    function step(now){
-      const t = Math.min(1, (now - start)/FADE_MS || 1);
-      activeAudio.volume = startVol * (1 - t);
-      idleAudio.volume   = targetVol * t;
-      if (t < 1) requestAnimationFrame(step);
-      else { activeAudio.pause(); const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp; }
-    }
-    requestAnimationFrame(step);
-  }
-  async function playTrackForAlt(alt, {immediate=false}={}){
-    const url = currentTrackURLForAlt(alt);
-    await crossfadeTo(url, immediate);
-    musicBtn.textContent='Music ON';
-    musicBtn.classList.add('toggled');
-  }
-  function toggleMusic(){
-    musicEnabled = !musicEnabled;
-    if (musicEnabled){
-      if (!activeAudio.currentSrc) {
-        const url = currentTrackURLForAlt(altitude);
-        activeAudio.src = url;
-      }
-      activeAudio.volume = 0.35;
-      activeAudio.play().catch(()=>{});
-      musicBtn.textContent='Music ON';
-      musicBtn.classList.add('toggled');
-    } else {
-      activeAudio.pause(); idleAudio.pause();
-      musicBtn.textContent='Music OFF';
-      musicBtn.classList.remove('toggled');
-    }
-    saveSettings();
-  }
+// change track for altitude
+async function playTrackForAlt(alt, { immediate = false } = {}){
+  const url = currentTrackURLForAlt(alt);
+  await crossfadeTo(url, immediate);
+  musicBtn.textContent = 'Music ON';
+  musicBtn.classList.add('toggled');
+}
 
-    function desiredAmbientURL(){
+// helper: what should be playing now?
+function desiredAmbientURL(){
   return boss.active ? MUSIC_BOSS : currentTrackURLForAlt(altitude);
 }
+
+// keep background music correct if state changes
 function ensureAmbientTrack(){
   if (!musicEnabled) return;
   const want = desiredAmbientURL();
@@ -1393,6 +1400,25 @@ function ensureAmbientTrack(){
   }catch{
     if (curr !== want) crossfadeTo(want);
   }
+}
+
+// music toggle button
+function toggleMusic(){
+  musicEnabled = !musicEnabled;
+  if (musicEnabled){
+    if (!activeAudio.currentSrc) {
+      activeAudio.src = currentTrackURLForAlt(altitude);
+    }
+    activeAudio.volume = 0.35;
+    activeAudio.play().catch(()=>{});
+    musicBtn.textContent = 'Music ON';
+    musicBtn.classList.add('toggled');
+  } else {
+    activeAudio.pause(); idleAudio.pause();
+    musicBtn.textContent = 'Music OFF';
+    musicBtn.classList.remove('toggled');
+  }
+  saveSettings();
 }
 
   // ================== Game lifecycle & UI ==================
@@ -1471,6 +1497,8 @@ function ensureAmbientTrack(){
     if (!boss.active && (player.dist/U) >= boss.nextAt){
       boss.start();
     }
+    
+    ensureAmbientTrack();
 
     // Move moving platforms
     for (const p of platforms){
