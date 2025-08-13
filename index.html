@@ -59,36 +59,44 @@
   </div>
 
   <canvas id="game"></canvas>
-<audio id="music" loop preload="auto"></audio>
+  <audio id="music" loop preload="auto"></audio>
 
 <script>
 (() => {
   // ================== Config ==================
-  const MUSIC_URL = "https://cdn.jsdelivr.net/gh/esteves7771/Pixel-Outrider@main/lazy-sunday-chill-lofi-377239.mp3";
   const SETTINGS_KEY = "endlessA16_settings";
   const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
   const U = 24 * DPR;
-  
+
+  // 5-tier soundtrack map
+  const MUSIC_BASE = "https://cdn.jsdelivr.net/gh/esteves7771/Pixel-Outrider@main/";
+  const TRACKS = {
+    "-2": "dark-descent-dark-ambience-230662.mp3",
+    "-1": "dark-horror-ambience-383336.mp3",
+    "0":  "lazy-sunday-chill-lofi-377239.mp3",
+    "1":  "relaxed-day-futuristic-chill-250712.mp3",
+    "2":  "nice-ambient-futuristic-chill-250714.mp3"
+  };
+
   let ac, master;
-function initAudio(){
-  if (ac) return;
-  ac = new (window.AudioContext||window.webkitAudioContext)();
-  master = ac.createGain(); master.gain.value = 0.22; master.connect(ac.destination);
-}
-function beep(freq, ms, type='square'){
-  if (!ac) return;
-  const o = ac.createOscillator(), g = ac.createGain();
-  o.type = type; o.frequency.value = freq;
-  o.connect(g); g.connect(master);
-  const t = ac.currentTime;
-  g.gain.setValueAtTime(0, t);
-  g.gain.linearRampToValueAtTime(0.7, t+0.01);
-  g.gain.exponentialRampToValueAtTime(0.001, t + ms/1000);
-  o.start(t); o.stop(t + ms/1000 + 0.02);
-}
-const sfxCoin = () => { beep(1100, 70, 'square'); beep(2200, 60, 'triangle'); };
-const sfxHeal = () => { beep(600, 120, 'sine'); beep(900, 120, 'sine'); };
-  
+  function initAudio(){
+    if (ac) return;
+    ac = new (window.AudioContext||window.webkitAudioContext)();
+    master = ac.createGain(); master.gain.value = 0.22; master.connect(ac.destination);
+  }
+  function beep(freq, ms, type='square'){
+    if (!ac) return;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.value = freq;
+    o.connect(g); g.connect(master);
+    const t = ac.currentTime;
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.7, t+0.01);
+    g.gain.exponentialRampToValueAtTime(0.001, t + ms/1000);
+    o.start(t); o.stop(t + ms/1000 + 0.02);
+  }
+  const sfxCoin = () => { beep(1100, 70, 'square'); beep(2200, 60, 'triangle'); };
+  const sfxHeal = () => { beep(600, 120, 'sine'); beep(900, 120, 'sine'); };
 
   const TUNE = {
     // Feel
@@ -101,14 +109,14 @@ const sfxHeal = () => { beep(600, 120, 'sine'); beep(900, 120, 'sine'); };
     ENEMY_WINDUP: [16,20], AIM_JITTER_DEG: 4, ENEMY_VIEW_FRAMES: 12,
     ENEMY_MAX_RANGE_TILES: 14, ENEMY_BULLET_CAP: 6,
     // World gen
-    HP_CHANCE: 0.06, HP_GUARANTEE_TILES: 18, // halved supply
+    HP_CHANCE: 0.06, HP_GUARANTEE_TILES: 18,
     COIN_CHANCE: 0.18,
     GEM_MIN_TILES: 400, GEM_MAX_TILES: 600,
-    // Movers
-    MOVE_AMP: 2.5 * U, MOVE_SPEED: 0.5, // radians/sec-ish
+    // Movers (base)
+    MOVE_AMP: 2.5 * U, MOVE_SPEED: 0.5,
     // Fliers
     FLIER_UNLOCK_DIST: 500 * U, FLIER_CAP: 3,
-    // Biomes
+    // Biomes / tiers
     ALT_MIN: -2, ALT_MAX: 2
   };
 
@@ -170,13 +178,20 @@ const sfxHeal = () => { beep(600, 120, 'sine'); beep(900, 120, 'sine'); };
   function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
   function deg2rad(d){ return d*Math.PI/180; }
   function onScreen(x,y,w,h,margin=40*DPR){ const sx=x-cam.x, sy=y-cam.y; return (sx+w>-margin && sx< W+margin && sy+h>-margin && sy< H+margin); }
-  // prevents missed top-collisions when falling fast
-const EPS = 2 * DPR;
+  const EPS = 2 * DPR;
   function toast(msg, t=1200){ const el=document.getElementById('toast'); el.textContent=msg; el.style.display='block'; setTimeout(()=>el.style.display='none', t); }
 
   // ================== Data ==================
   const platforms=[], traps=[], enemies=[], bullets=[], hpPacks=[], coins=[], gems=[], flyers=[], ladders=[];
-  let genX=0, lastHPAt=0, lastGemAt= -99999, isNight=false, biome='ground', altitude=0, lastLadderAt=-9999;
+  let genX=0, lastHPAt=0, lastGemAt= -99999, isNight=false, biome='ground', altitude=0;
+
+  // big-ladder spawn window management
+  let nextTierWinStart=Infinity, nextTierWinEnd=Infinity, spawnedTierLadderThisWindow=false;
+  function scheduleNextTierWindow(baseTiles){
+    nextTierWinStart = Math.floor(baseTiles + 200);
+    nextTierWinEnd   = Math.floor(baseTiles + 400);
+    spawnedTierLadderThisWindow = false;
+  }
 
   // ================== Sprites ==================
   function drawSprite(bitmap, palette, x,y, scale=2){
@@ -191,7 +206,6 @@ const EPS = 2 * DPR;
     }
   }
 
-  // player + soldier + runner (more detail)
   const palPlayer = {'0':'#0e1726','1':'#2b3a55','2':'#7dd3fc','3':'#c9f2ff','4':'#ff6d8a','5':'#f0b090','6':'#1b2744'};
   const bmpPlayer = [
     "...22222222...",
@@ -236,7 +250,6 @@ const EPS = 2 * DPR;
     "...bbbbbbbbbb..."
   ];
 
-  // Fliers (winged red)
   const palFlyer = {'r':'#ff4d6d','R':'#ff9bb0','w':'#ffffff','k':'#0e1726'};
   const bmpFlyerWingUp = [
     "...rrrRrrr...",
@@ -272,100 +285,96 @@ const EPS = 2 * DPR;
       this.pos = {x:2*U, y:-6*U};
       this.size = {w:0.9*U, h:1.5*U};
       this.vel  = {x:0, y:0};
-      this.ladderDir = null; // 'up' or 'down' for link ladders
+      this.ladderDir = null;
       this.hp=100; this.alive=true; this.score=0; this.dist=0; this.coins=0;
       this.fireCD=0; this.iframes=0; this.lives=3;
       this.onGround=false; this.coyote=0; this.jumpBuf=0; this.groundedOn=null;
       this.lastSafe = {x:this.pos.x, y:this.pos.y}; this.groundFrames=0;
       this.damageMeter=0;
-      // Gem effects
-      this.scoreX2 = 0;      // frames
-      this.magnet  = 0;      // frames
-      // Ladder
-      this.onLadder = null;  // object or null
-      this.ladderT  = 0;     // 0..1 climb progress
+      this.scoreX2 = 0;
+      this.magnet  = 0;
+      this.onLadder = null;
+      this.ladderT  = 0;
     }
     rect(){ return new Rect(this.pos.x, this.pos.y, this.size.w, this.size.h); }
 
     update(){
       if(!this.alive) return;
 
-      // Ladder handling (disable shoot/jump, lerp position)
+      // Ladder handling
       if (this.onLadder){
-  const L = this.onLadder;
-  this.ladderT += 0.02; // climb speed
-  const t = Math.min(1, this.ladderT);
+        const L = this.onLadder;
+        this.ladderT += 0.02;
+        const t = Math.min(1, this.ladderT);
 
-  // freeze physics; place on ladder
-  this.vel.x = this.vel.y = 0;
-  this.pos.x = L.x + L.w*0.3;
+        this.vel.x = this.vel.y = 0;
+        this.pos.x = L.x + L.w*0.3;
 
-  const goingUp = (L.dir === 'up') || (L.dir === 'link' && this.ladderDir !== 'down');
-  const phase   = goingUp ? (1 - t) : t; // 1->0 when going up, 0->1 when down
-  this.pos.y = L.y + phase * L.h - this.size.h;
+        const goingUp = (L.dir === 'up') || (L.dir === 'link' && this.ladderDir !== 'down');
+        const phase   = goingUp ? (1 - t) : t;
+        this.pos.y = L.y + phase * L.h - this.size.h;
 
-  this.onGround = false; this.groundedOn = null;
+        this.onGround = false; this.groundedOn = null;
 
-  if (t >= 1){
-    // Only tier-shift on 'up'/'down' ladders (old behavior)
-    if (L.dir === 'up' || L.dir === 'down'){
-      altitude = clamp(altitude + (L.dir === 'up' ? +1 : -1), TUNE.ALT_MIN, TUNE.ALT_MAX);
-      biome = altitude>0 ? 'sky' : altitude<0 ? 'depths' : 'ground';
-      rebuildBGs();
-      toast(biome==='sky' ? 'Sky Tier +1' : 'Depth Tier −1', 1200);
-    }
-    this.onLadder = null; this.ladderT = 0; this.ladderDir = null;
-    this.lastSafe = {x:this.pos.x, y:this.pos.y};
-  }
-} else {
-  // (rest of your movement code unchanged)
-
+        if (t >= 1){
+          if (L.dir === 'up' || L.dir === 'down'){
+            const oldAlt = altitude;
+            altitude = clamp(altitude + (L.dir === 'up' ? +1 : -1), TUNE.ALT_MIN, TUNE.ALT_MAX);
+            biome = altitude>0 ? 'sky' : altitude<0 ? 'depths' : 'ground';
+            rebuildBGs();
+            toast(altitude>oldAlt ? `Tier +${altitude}` : `Tier ${altitude}`, 1000);
+            playTrackForAlt(altitude, {immediate:false});
+            // new big-ladder window starts from where we are now
+            scheduleNextTierWindow(this.dist / U);
+          }
+          this.onLadder = null; this.ladderT = 0; this.ladderDir = null;
+          this.lastSafe = {x:this.pos.x, y:this.pos.y};
+        }
+      } else {
         // horizontal input
         if (keys.has('keya')||keys.has('arrowleft'))  this.vel.x -= TUNE.ACCEL*DPR;
         if (keys.has('keyd')||keys.has('arrowright')) this.vel.x += TUNE.ACCEL*DPR;
 
-        // Jump buffer edge-triggered
+        // Jump buffering / coyote
         if (input.jumpPressed){ this.jumpBuf = TUNE.JUMP_BUFFER_FRAMES; input.jumpPressed = false; }
         if (this.coyote>0 && this.jumpBuf>0){ this.vel.y = -TUNE.JUMP*DPR; this.onGround=false; this.coyote=0; this.jumpBuf=0; }
         if (this.jumpBuf>0) this.jumpBuf--;
 
         // Physics
-            this.vel.y += TUNE.GRAV*DPR;
-            this.vel.x = clamp(this.vel.x, -TUNE.MAX_VX*DPR, TUNE.MAX_VX*DPR);
+        this.vel.y += TUNE.GRAV*DPR;
+        this.vel.x = clamp(this.vel.x, -TUNE.MAX_VX*DPR, TUNE.MAX_VX*DPR);
 
-        // Clamp extreme fall (reduces tunneling)
-            const MAX_FALL = 22 * DPR;
-            if (this.vel.y > MAX_FALL) this.vel.y = MAX_FALL;
+        // Clamp fall to reduce tunneling
+        const MAX_FALL = 22 * DPR;
+        if (this.vel.y > MAX_FALL) this.vel.y = MAX_FALL;
 
-        // Move with swept vertical landing
-            const prevY = this.pos.y;
-            this.pos.x += this.vel.x; this.pos.y += this.vel.y;
+        const prevY = this.pos.y;
+        this.pos.x += this.vel.x; this.pos.y += this.vel.y;
 
-        let grounded=false, groundPlat=null, carryDX=0, carryDY=0;
+        let grounded=false, groundPlat=null;
 
-        // Moving platforms update already computed dx/dy; do swept check
+        // Collisions with platforms
         for(const p of platforms){
           if(!p.solid) continue;
           const pr = new Rect(p.x,p.y,p.w,p.h);
           const r  = new Rect(this.pos.x, this.pos.y, this.size.w, this.size.h);
 
-          // Vertical sweep: landing on top (tolerant)
-            if (this.vel.y > 0 && r.right > pr.left && r.left < pr.right){
+          // landing
+          if (this.vel.y > 0 && r.right > pr.left && r.left < pr.right){
             const prevBottom = prevY + this.size.h;
             if (prevBottom <= pr.top + EPS && r.bottom >= pr.top - EPS){
-            this.pos.y = pr.top - this.size.h;
-            this.vel.y = 0;
-            grounded = true;
-            groundPlat = p;
+              this.pos.y = pr.top - this.size.h;
+              this.vel.y = 0;
+              grounded = true; groundPlat = p;
             }
           }
-          // Ceiling bump
+          // head bump
           if (this.vel.y<0 && r.right>pr.left && r.left<pr.right){
             if (r.top <= pr.bottom && prevY >= pr.bottom){
               this.pos.y = pr.bottom; this.vel.y = 0.3*DPR;
             }
           }
-          // Horizontal resolve
+          // horizontal resolve
           const rr = new Rect(this.pos.x, this.pos.y, this.size.w, this.size.h);
           if (rr.bottom>pr.top+2 && rr.top<pr.bottom-2){
             if (rr.right>pr.left && rr.left<pr.left && this.vel.x>0){ this.pos.x = pr.left - this.size.w; this.vel.x *= -0.02; }
@@ -373,36 +382,34 @@ const EPS = 2 * DPR;
           }
         }
 
-        // Carry by moving platform
+        // carry by movers
         if (grounded && groundPlat && groundPlat.dx){
-          carryDX = groundPlat.dx; carryDY = groundPlat.dy;
-          this.pos.x += carryDX; this.pos.y += carryDY;
+          this.pos.x += groundPlat.dx; this.pos.y += groundPlat.dy;
         }
 
         this.onGround = grounded; this.groundedOn = grounded ? groundPlat : null;
 
-// Keep feet “planted” on movers (prevents micro gaps)
-if (grounded && groundPlat){
-  this.pos.y = Math.min(this.pos.y, groundPlat.y - this.size.h);
-  this.pos.y += 0.2 * DPR; // tiny downward bias
-}
+        // keep feet planted on movers
+        if (grounded && groundPlat){
+          this.pos.y = Math.min(this.pos.y, groundPlat.y - this.size.h);
+          this.pos.y += 0.2 * DPR;
+        }
 
-if (grounded){
-  this.coyote = TUNE.COYOTE_FRAMES;
-  this.groundFrames++;
-  if (this.groundFrames > 8) this.lastSafe = {x:this.pos.x, y:this.pos.y};
-} else {
-  this.coyote = Math.max(0, this.coyote - 1);
-  this.groundFrames = 0;
-}
+        if (grounded){
+          this.coyote = TUNE.COYOTE_FRAMES;
+          this.groundFrames++;
+          if (this.groundFrames > 8) this.lastSafe = {x:this.pos.x, y:this.pos.y};
+        } else {
+          this.coyote = Math.max(0, this.coyote - 1);
+          this.groundFrames = 0;
+        }
 
-// More friction when standing on a moving platform
-this.vel.x *= this.onGround
-  ? (this.groundedOn && this.groundedOn.moving ? 0.80 : 0.86)
-  : 0.96;
+        // friction
+        this.vel.x *= this.onGround
+          ? (this.groundedOn && this.groundedOn.moving ? 0.80 : 0.86)
+          : 0.96;
 
-
-        // Traps (20 HP) with i-frames; traps only damage from top contact or flames
+        // Traps (flames only hurt when active)
         if (this.iframes>0) this.iframes--;
         else for (const t of traps){
           if (t.type==='flame' && !t.active) continue;
@@ -416,12 +423,12 @@ this.vel.x *= this.onGround
           if (this.rect().intersects(new Rect(h.x,h.y,h.w,h.h))){ this.hp=clamp(this.hp+25,0,100); hpPacks.splice(i,1); sfxHeal(); }
         }
 
-        // Coins (magnet + pickup)
+        // Coins
         for (let i=coins.length-1;i>=0;i--){
           const c=coins[i];
           const cx=c.x+c.r, cy=c.y+c.r, px=this.pos.x+this.size.w/2, py=this.pos.y+this.size.h/2;
           const dx=px-cx, dy=py-cy, d=Math.hypot(dx,dy);
-          if (this.magnet>0 && d<6*U){ // attract
+          if (this.magnet>0 && d<6*U){
             const s = 0.6*DPR; c.vx += (dx/d)*s; c.vy += (dy/d)*s;
           }
           c.x += c.vx||0; c.y += c.vy||0; c.vx*=0.96; c.vy*=0.96;
@@ -477,7 +484,6 @@ this.vel.x *= this.onGround
       const dir = (mouse.x > sx + this.size.w/2) ? 1 : -1;
       ctx.fillStyle='#c7b8ff';
       ctx.fillRect(sx + this.size.w/2 + dir*6*DPR, sy + this.size.h/2, 8*DPR*dir, 2*DPR);
-      // Gem effect icons (tiny)
       if (this.scoreX2>0){ ctx.fillStyle='#ff9b5a'; ctx.fillRect(sx-8*DPR, sy, 6*DPR, 6*DPR); }
       if (this.magnet>0){ ctx.fillStyle='#5ad1ff'; ctx.fillRect(sx-8*DPR, sy+8*DPR, 6*DPR, 6*DPR); }
     }
@@ -566,10 +572,10 @@ this.vel.x *= this.onGround
       this.kind='flyer';
       this.role=role; this.x=x; this.y=y; this.w=0.9*U; this.h=0.9*U;
       this.hp = role==='gunner'?60:50; this.alive=true;
-      this.t   = rand(0,Math.PI*2); // phase
+      this.t   = rand(0,Math.PI*2);
       this.vx=0; this.vy=0;
       this.visibleFrames=0; this.windup=0; this.shootCD=irand(140,200);
-      this.diveT=0; // 0 idle, >0 diving
+      this.diveT=0;
       this.flap=0;
     }
     update(){
@@ -577,7 +583,6 @@ this.vel.x *= this.onGround
       this.t += 0.03;
       this.flap = (Math.sin(this.t*2)>0)?1:0;
 
-      // visibility
       if (onScreen(this.x,this.y,this.w,this.h,40*DPR)) this.visibleFrames++; else this.visibleFrames=0;
 
       const px=player.pos.x+player.size.w/2, py=player.pos.y+player.size.h/2;
@@ -585,7 +590,6 @@ this.vel.x *= this.onGround
       const dist = Math.hypot(dx,dy);
 
       if (this.role==='swooper'){
-        // patrol height & sine
         const targetY = py - 3*U + Math.sin(this.t)*0.8*U;
         const targetX = px + Math.cos(this.t*0.6)*2.0*U;
         const k=0.02*DPR;
@@ -594,23 +598,19 @@ this.vel.x *= this.onGround
         this.vx = clamp(this.vx, -2.2*DPR, 2.2*DPR);
         this.vy = clamp(this.vy, -2.0*DPR, 2.0*DPR);
 
-        // dive when visible and timer hits
         if (this.visibleFrames> TUNE.ENEMY_VIEW_FRAMES && this.diveT<=0 && (this.t%6<0.05)){
-          this.diveT = 40; // frames
+          this.diveT = 40;
         }
         if (this.diveT>0){
           this.diveT--;
-          // telegraph first 10 frames (no damage)
           const a = Math.atan2(dy,dx);
           this.vx += Math.cos(a)*0.3*DPR;
           this.vy += Math.sin(a)*0.3*DPR;
-          // contact damage only during last 24 frames
           if (this.diveT<24){
             if (new Rect(this.x,this.y,this.w,this.h).intersects(player.rect()) && player.iframes<=0){ player.damage(18); this.diveT=0; }
           }
         }
-      } else { // hover gunner
-        // hover near target window
+      } else {
         const targetY = py - 2.5*U + Math.sin(this.t)*0.6*U;
         const targetX = px + Math.cos(this.t*0.8)*1.6*U;
         const k=0.02*DPR;
@@ -626,7 +626,6 @@ this.vel.x *= this.onGround
           if (this.windup===1){
             const a=Math.atan2(dy,dx)+deg2rad(rand(-3,3)), sp=TUNE.ENEMY_BULLET_SPEED*DPR;
             if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a)*sp,Math.sin(a)*sp,false));
-            // 2-shot burst
             if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a+deg2rad(4))*sp,Math.sin(a+deg2rad(4))*sp,false));
           }
         } else this.windup=0;
@@ -642,61 +641,53 @@ this.vel.x *= this.onGround
 
   // ================== World / Traps / Pickups ==================
   function addPlatform(x,y,w,h,type='grass', moving=null){
-    // overlap guard
     for (const p of platforms){
       const overlapX = !(x+w < p.x+0.5*U || x > p.x+p.w-0.5*U);
       const tooCloseY = Math.abs((y)-(p.y)) < 0.8*U;
-      if (overlapX && tooCloseY) return null; // skip
+      if (overlapX && tooCloseY) return null;
     }
     const obj={x,y,w,h,solid:true,type, moving, x0:x, y0:y, dx:0, dy:0};
     platforms.push(obj);
     return obj;
   }
   function addSaw(x,y){ traps.push({x,y,w:U*0.9,h:U*0.9,type:'saw',t:rand(0,6.28)}); }
-  function addSpikes(x,y,w){ traps.push({x,y,w,h:U*0.4,type:'spike'}); } // shallower hitbox
-  function addFlame(x,y){ traps.push({x,y,w:U*0.8,h:U*1.2,type:'flame',t:0,active:false, px:[]}); } // flames smaller
+  function addSpikes(x,y,w){ traps.push({x,y,w,h:U*0.4,type:'spike'}); }
+  function addFlame(x,y){ traps.push({x,y,w:U*0.8,h:U*1.2,type:'flame',t:0,active:false,warn:false}); }
   function addHP(x,y){ hpPacks.push({x,y,w:0.7*U,h:0.5*U}); }
-function spawnCoin(x,y){
-  // avoid bunching: skip if another coin is too close
-  for (let i=coins.length-1;i>=Math.max(0, coins.length-12);i--){
-    const c=coins[i]; const dx=c.x-x, dy=c.y-y;
-    if (dx*dx + dy*dy < (0.55*U)*(0.55*U)) return;
+  function spawnCoin(x,y){
+    for (let i=coins.length-1;i>=Math.max(0, coins.length-12);i--){
+      const c=coins[i]; const dx=c.x-x, dy=c.y-y;
+      if (dx*dx + dy*dy < (0.55*U)*(0.55*U)) return;
+    }
+    coins.push({ x:x-0.28*U, y:y-0.28*U, r:0.28*U, vx:0, vy:0, t:0, spin:rand(0.08,0.12) });
   }
-  coins.push({ x:x-0.28*U, y:y-0.28*U, r:0.28*U, vx:0, vy:0, t:0, spin:rand(0.08,0.12) });
-}  function addGem(x,y,kind){ gems.push({x,y,w:0.6*U,h:0.6*U,kind}); }
-  function addLadder(x,y,h,dir){ ladders.push({x:x+0.2*U,y:y-h, w:0.4*U, h, dir}); lastLadderAt = player.dist/U; }
-  
-  // Add DK-style ladder between two overlapping platforms (no biome shift)
-function tryAddConnectLadder(lower){
-  // find a platform above that horizontally overlaps
-  let pick = null;
-  for (const up of platforms){
-    if (up === lower) continue;
-    if (up.y >= lower.y - 0.8*U) continue;       // must be above
-    const dy = lower.y - up.y;                    // ladder height
-    if (dy < 1.2*U || dy > 6.2*U) continue;       // sensible span
+  function addGem(x,y,kind){ gems.push({x,y,w:0.6*U,h:0.6*U,kind}); }
+  function addLadder(x,y,h,dir){ ladders.push({x:x+0.2*U,y:y-h, w:0.4*U, h, dir}); }
 
-    // overlap window where a ladder can sit
-    const L = Math.max(lower.x, up.x) + 0.1*U;
-    const R = Math.min(lower.x + lower.w, up.x + up.w) - 0.5*U;
-    if (R <= L) continue;
+  // link/rescue ladder between overlapping platforms (no tier shift)
+  function tryAddConnectLadder(lower){
+    let pick = null;
+    for (const up of platforms){
+      if (up === lower) continue;
+      if (up.y >= lower.y - 0.8*U) continue;
+      const dy = lower.y - up.y;
+      if (dy < 1.2*U || dy > 6.2*U) continue;
 
-    const x = rand(L, R);
+      const L = Math.max(lower.x, up.x) + 0.1*U;
+      const R = Math.min(lower.x + lower.w, up.x + up.w) - 0.5*U;
+      if (R <= L) continue;
 
-    // avoid traps and other ladders along the run
-    if (areaHasTrap(x, up.y, 0.6*U, dy)) continue;
-    if (ladders.some(Ld => Math.abs((Ld.x+Ld.w/2)-(x+0.2*U)) < 1.2*U &&
-                           Math.abs((Ld.y+Ld.h/2) - (up.y + dy/2)) < 1.2*U)) continue;
-
-    pick = {x, y: lower.y, h: dy};
-    break;
+      const x = rand(L, R);
+      if (areaHasTrap(x, up.y, 0.6*U, dy)) continue;
+      if (ladders.some(Ld => Math.abs((Ld.x+Ld.w/2)-(x+0.2*U)) < 1.2*U &&
+                             Math.abs((Ld.y+Ld.h/2) - (up.y + dy/2)) < 1.2*U)) continue;
+      pick = {x, y: lower.y, h: dy};
+      break;
+    }
+    if (pick) addLadder(pick.x, pick.y, pick.h, 'link');
   }
-  if (pick) addLadder(pick.x, pick.y, pick.h, 'link'); // 'link' = no biome change
-}
-
 
   function areaHasTrap(x,y,w,h){ for(const t of traps){ if (x<w+t.x+t.w && x+w>t.x && y<h+t.y+t.h && y+h>t.y) return true; } return false; }
-
   function enemyBulletCount(){ let n=0; for(const b of bullets) if(!b.friendly) n++; return n; }
 
   // ================== Backgrounds & Patterns ==================
@@ -704,46 +695,57 @@ function tryAddConnectLadder(lower){
                      night: document.createElement('canvas').getContext('2d') };
   bgCanvas.day.imageSmoothingEnabled=false; bgCanvas.night.imageSmoothingEnabled=false;
 
-  // small pattern canvases
   const pat = { grass:null, stone:null, metal:null };
 
-  function buildBG(ctx2, mode){ // mode considers biome + night
+  function buildBG(ctx2, mode){
     const w = ctx2.canvas.width, h = ctx2.canvas.height;
     ctx2.clearRect(0,0,w,h);
-    // palettes by biome
     const isNightMode = (mode==='night');
-    const b = biome==='sky' ? (isNightMode
-      ? ['#0a1026','#0e1737','#13204b','#1a2c66']  // night sky
-      : ['#1a54f2','#2f6ff8','#4b8cff','#63c3cf']) // day sky
-      : biome==='depths' ? (isNightMode
-      ? ['#160b15','#1f0f1e','#2a1328','#361632']  // night depths
-      : ['#2a1032','#3a1844','#4a2056','#622a6e']) // day depths (purple)
-      : (isNightMode
-      ? ['#0b121f','#111a2b','#18243a','#1f2e49']
-      : ['#1a54f2','#2f6ff8','#4b8cff','#63c3cf']);
 
-    // sky bands
+    // palette by exact tier flavor
+    let b;
+    if (altitude >= 2){
+      b = isNightMode ? ['#05070f','#090d1a','#0d1326','#111a35'] : ['#0b1633','#12224a','#1c3270','#25488f'];
+    } else if (altitude === 1){
+      b = isNightMode ? ['#081220','#0d1a2e','#13223d','#19304f'] : ['#1a54f2','#2f6ff8','#4b8cff','#63c3cf'];
+    } else if (altitude === 0){
+      b = isNightMode ? ['#0b121f','#111a2b','#18243a','#1f2e49'] : ['#15335f','#1d467f','#23539a','#2b66bb']; // slightly darker ground
+    } else if (altitude === -1){
+      b = isNightMode ? ['#0a0d16','#0f1320','#151a2a','#1b2235'] : ['#11182a','#151f36','#1a2742','#213051'];
+    } else {
+      b = isNightMode ? ['#160b15','#1f0f1e','#2a1328','#361632'] : ['#2a1032','#3a1844','#4a2056','#622a6e'];
+    }
+
     const bh=(h*0.5)/b.length;
     for(let i=0;i<b.length;i++){ ctx2.fillStyle=b[i]; ctx2.fillRect(0,(i*bh)|0,w,Math.ceil(bh)); }
-    // ground tint
-    ctx2.fillStyle = isNightMode ? '#152031' : (biome==='depths' ? '#2b1430' : '#20345a');
+    ctx2.fillStyle = isNightMode ? '#152031' :
+      (altitude<=-1 ? '#2b1430' : altitude>=1 ? '#20345a' : '#1b2945');
     ctx2.fillRect(0,(h*0.5)|0,w,h);
 
-    if (biome==='sky'){
-      // many clouds
+    // extras per tier
+    if (altitude >= 2){
+      // starfield
+      ctx2.fillStyle = isNightMode ? '#9fb5ff' : '#d4e1ff';
+      for(let i=0;i<160;i++){ ctx2.fillRect((i*37)%w, (i*71)%(h*0.45), 1,1); }
+      // simple alien ships
+      ctx2.fillStyle = isNightMode ? '#b3ffde' : '#8df7cc';
+      for(let i=0;i<6;i++){ const x=(i*210+80)%w, y=40+(i%3)*22; ctx2.fillRect(x,y,24,3); ctx2.fillRect(x+6,y-4,12,4); }
+    } else if (altitude === 1){
+      // clouds
       ctx2.fillStyle = isNightMode ? '#cfd9ff' : '#ffffff';
       for(let i=0;i<12;i++){ const cx=(i*120+40)%w, cy=50+(i%4)*14; ctx2.fillRect(cx,cy,60,10); ctx2.fillRect(cx-10,cy+10,80,10); ctx2.fillRect(cx+15,cy+20,30,10); }
-      // light mountains
-      ctx2.fillStyle = isNightMode ? '#314a82' : '#3a6db6';
-      for(let i=-2;i<Math.ceil(w/120)+2;i++){ const mx=i*120+60; ctx2.beginPath(); ctx2.moveTo(mx-60,h*0.48); ctx2.lineTo(mx,h*0.28); ctx2.lineTo(mx+60,h*0.48); ctx2.closePath(); ctx2.fill(); }
-    } else if (biome==='depths'){
-      // lava glow bands
-      for(let r=0;r<3;r++){ ctx2.fillStyle=['#5b1220','#7a1b12','#a42818'][r]; const y=h*0.55+r*18; for(let x=0;x<w;x+=30){ ctx2.beginPath(); ctx2.arc(x, y+((x%60)?8:0), 30, Math.PI, 0); ctx2.fill(); } }
-      // sparse embers
+      // birds
+      ctx2.fillStyle = isNightMode ? '#b0c4ff' : '#2b3a55';
+      for(let i=0;i<10;i++){ const x=(i*150+30)%w, y=70+(i%3)*16; ctx2.fillRect(x,y,8,2); ctx2.fillRect(x+10,y+2,6,2); }
+    } else if (altitude <= -1){
+      // lava glow bands & embers (deeper = more)
+      const bands = altitude<=-2 ? 4 : 3;
+      for(let r=0;r<bands;r++){ ctx2.fillStyle=['#5b1220','#7a1b12','#a42818','#c0392b'][r]; const yy=h*0.55+r*18; for(let x=0;x<w;x+=30){ ctx2.beginPath(); ctx2.arc(x, yy+((x%60)?8:0), 30, Math.PI, 0); ctx2.fill(); } }
       ctx2.fillStyle = isNightMode ? '#ffb55a' : '#ffd08a';
-      for(let i=0;i<100;i++){ ctx2.fillRect((i*37)%w, (i*53)%(h*0.6), 1,1); }
+      const emberN = altitude<=-2 ? 140 : 100;
+      for(let i=0;i<emberN;i++){ ctx2.fillRect((i*37)%w, (i*53)%(h*0.6), 1,1); }
     } else {
-      // mountains standard + few clouds
+      // default mountains + few clouds
       ctx2.fillStyle = isNightMode ? '#314a82' : '#3a6db6';
       for(let i=-2;i<Math.ceil(w/120)+2;i++){ const mx=i*120+60; ctx2.beginPath(); ctx2.moveTo(mx-60,h*0.48); ctx2.lineTo(mx,h*0.28); ctx2.lineTo(mx+60,h*0.48); ctx2.closePath(); ctx2.fill(); }
       ctx2.fillStyle = isNightMode ? '#cfd9ff' : '#ffffff';
@@ -764,16 +766,23 @@ function tryAddConnectLadder(lower){
     ctx.fillRect(0,0,W,H);
     const bg = isNight ? bgCanvas.night : bgCanvas.day;
     const tileW = bg.canvas.width, tileH = bg.canvas.height;
-    const speed = (biome==='sky'?0.12 : biome==='depths'?0.18 : 0.15);
+    const speed = (altitude>=1?0.12 : altitude<=-1?0.18 : 0.15);
     const off = (-Math.floor((cam.x * speed) % tileW)) | 0;
     for (let x = off; x < W; x += tileW) ctx.drawImage(bg.canvas, x|0, 0, tileW, tileH);
-    if (isNight){ const g=ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'rgba(0,0,0,0.12)'); g.addColorStop(1,'rgba(0,0,0,0.18)'); ctx.fillStyle=g; ctx.fillRect(0,0,W,H); }
+
+    // vignette stronger on ground/underground
+    const vig = (altitude<=0) ? (isNight?0.22:0.14) : (isNight?0.12:0.08);
+    if (vig>0){
+      const g=ctx.createLinearGradient(0,0,0,H);
+      g.addColorStop(0,`rgba(0,0,0,${vig})`);
+      g.addColorStop(1,`rgba(0,0,0,${vig*1.2})`);
+      ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    }
   }
 
   // Patterns
   function makePatternGrass(){
     const c=document.createElement('canvas'); c.width=c.height=8*DPR; const g=c.getContext('2d'); g.imageSmoothingEnabled=false;
-    // soil dither (two blues)
     g.fillStyle='#394a6b'; g.fillRect(0,0,c.width,c.height);
     g.fillStyle='#324260'; for(let y=0;y<c.height;y+=2) for(let x=(y%4?2:0);x<c.width;x+=4) g.fillRect(x,y,1,1);
     return g.createPattern(c,'repeat');
@@ -781,7 +790,7 @@ function tryAddConnectLadder(lower){
   function makePatternStone(){
     const c=document.createElement('canvas'); c.width=16*DPR; c.height=8*DPR; const g=c.getContext('2d'); g.imageSmoothingEnabled=false;
     g.fillStyle='#556079'; g.fillRect(0,0,c.width,c.height);
-    g.fillStyle='#4a546d'; g.fillRect(1,1,c.width-2,1); g.fillRect(1,6,c.width-2,1); // mortar lines
+    g.fillStyle='#4a546d'; g.fillRect(1,1,c.width-2,1); g.fillRect(1,6,c.width-2,1);
     g.fillStyle='#6a7490'; g.fillRect(8,0,1,c.height);
     return g.createPattern(c,'repeat');
   }
@@ -789,7 +798,7 @@ function tryAddConnectLadder(lower){
     const c=document.createElement('canvas'); c.width=16*DPR; c.height=8*DPR; const g=c.getContext('2d'); g.imageSmoothingEnabled=false;
     g.fillStyle='#2b3347'; g.fillRect(0,0,c.width,c.height);
     g.fillStyle='#21293a'; g.fillRect(0,0,c.width,1);
-    g.fillStyle='#3a435a'; for(let x=2;x<c.width;x+=6) g.fillRect(x,3,2,2); // rivets
+    g.fillStyle='#3a435a'; for(let x=2;x<c.width;x+=6) g.fillRect(x,3,2,2);
     return g.createPattern(c,'repeat');
   }
   function rebuildPatterns(){
@@ -801,7 +810,6 @@ function tryAddConnectLadder(lower){
   function drawPlatform(p){
     const sx=toScreenX(p.x), sy=toScreenY(p.y);
     if (sx+p.w<-200||sx>W+200) return;
-    // body pattern aligned to world grid
     ctx.save();
     const pattern = (p.type==='stone')?pat.stone : (p.type==='metal')?pat.metal : pat.grass;
     const offX = (-cam.x|0)%16, offY = (-cam.y|0)%16;
@@ -810,17 +818,14 @@ function tryAddConnectLadder(lower){
     ctx.fillRect(sx-offX, sy-offY, p.w, p.h);
     ctx.restore();
 
-    // top lip & details
     if (p.type==='metal'){
       ctx.fillStyle='#6f7a96'; ctx.fillRect(sx, sy-4*DPR, p.w, 4*DPR);
-      // hazard on movers
       if (p.moving){ for(let x=0;x<p.w;x+=12*DPR){ ctx.fillStyle = ((x/ (12*DPR))%2? '#f6c653':'#2b3347'); ctx.fillRect(sx+x, sy-6*DPR, 12*DPR, 2*DPR);} }
     } else if (p.type==='stone'){
       ctx.fillStyle='#6a7490'; ctx.fillRect(sx, sy-4*DPR, p.w, 4*DPR);
-      ctx.fillStyle='#485068'; for(let i=0;i<Math.floor(p.w/(24*DPR));i++){ const rx=sx+i*24*DPR+8*DPR; ctx.fillRect(rx, sy-2*DPR, 2*DPR, 2*DPR); } // cracks
+      ctx.fillStyle='#485068'; for(let i=0;i<Math.floor(p.w/(24*DPR));i++){ const rx=sx+i*24*DPR+8*DPR; ctx.fillRect(rx, sy-2*DPR, 2*DPR, 2*DPR); }
     } else {
       ctx.fillStyle='#5be38d'; ctx.fillRect(sx, sy-6*DPR, p.w, 6*DPR);
-      // tufts
       ctx.fillStyle='#3ec676';
       for(let i=8*DPR;i<p.w;i+=12*DPR){ ctx.fillRect(sx+i, sy-8*DPR, 2*DPR, 2*DPR); ctx.fillRect(sx+i+3*DPR, sy-9*DPR, 2*DPR, 3*DPR); }
     }
@@ -831,120 +836,222 @@ function tryAddConnectLadder(lower){
   function enemySpawnChance(){
     const prog = genX / (U*200);
     let base = clamp(0.10 + prog*0.05, 0.10, 0.45) * difficultyMod();
-    if (biome==='sky') base *= 0.9; // slightly fewer ground foes
-    if (biome==='depths') base *= 1.1;
+    if (altitude>=1) base *= 0.9;
+    if (altitude<=-1) base *= 1.1;
     return base;
   }
 
   function pickPlatformType(isMover=false){
     if (isMover) return 'metal';
-    if (biome==='depths') return Math.random()<0.7?'stone':'metal';
-    if (biome==='sky')    return Math.random()<0.7?'grass':'stone';
+    if (altitude<=-1) return Math.random()<0.7?'stone':'metal';
+    if (altitude>=1)  return Math.random()<0.7?'grass':'stone';
     return Math.random()<0.6?'grass':'stone';
   }
 
-function generateChunk(){
-  // occasional ladder chunk after dist ≥ 300 and spacing
-  const allowLadder = (player.dist / U > 300) && ((player.dist / U) - lastLadderAt > 20) && Math.random() < 0.12;
+  function generateChunk(){
+    const width = irand(14, 20) * U;
+    const baseY = -irand(2, 8) * U + altitude * U * 1.2;
+    let x = genX;
+    let lastTop = baseY + irand(-2, 2) * U;
 
-  const width = irand(14, 20) * U;
-  const baseY = -irand(2, 8) * U + altitude * U * 1.2;
-  let x = genX;
-  let lastTop = baseY + irand(-2, 2) * U;
+    const tilesWalked = player.dist / U;
+    const withinTierWin = tilesWalked >= nextTierWinStart && tilesWalked <= nextTierWinEnd && !spawnedTierLadderThisWindow;
 
-  // archetype
-  const archetypes = ['ascend','descend','stairs','gaps','movers'];
-  const arch  = allowLadder ? 'ladder' : archetypes[irand(0, archetypes.length)];
-  const steps = irand(4,7);
+    const archetypes = ['ascend','descend','stairs','gaps','movers'];
+    const arch  = withinTierWin ? 'tierLadder' : archetypes[irand(0, archetypes.length)];
+    const steps = irand(4,7);
+    const bumpAt = irand(1, steps - 1);
 
-  // pick exactly one step to “bump” up or down
-  const bumpAt = irand(1, steps - 1);
+    for (let i = 0; i < steps; i++){
+      const w   = irand(3,5) * U;
+      const gap = (arch === 'gaps') ? irand(3,6) * U : irand(2,4) * U;
+      let y     = lastTop;
 
-  for (let i = 0; i < steps; i++){
-    const w   = irand(3,5) * U;
-    const gap = (arch === 'gaps') ? irand(3,6) * U : irand(2,4) * U;
-    let y     = lastTop;
+      if (arch === 'ascend')  y -= irand(0,2) * U;
+      if (arch === 'descend') y += irand(0,2) * U;
+      if (arch === 'stairs')  y += (i % 2 ? -U*0.8 : U*0.8);
+      if (arch !== 'tierLadder' && i === bumpAt) y += (Math.random() < 0.5 ? -U : +U);
 
-    if (arch === 'ascend')  y -= irand(0,2) * U;
-    if (arch === 'descend') y += irand(0,2) * U;
-    if (arch === 'stairs')  y += (i % 2 ? -U*0.8 : U*0.8);
-    if (arch !== 'ladder' && i === bumpAt) y += (Math.random() < 0.5 ? -U : +U);
+      // movers (35% faster overall; tier flavor)
+      let moving = null;
+      if (arch === 'movers' && Math.random() < 0.6){
+        const tierMul = altitude>=1 ? 1.35 : altitude<=-1 ? 0.9 : 1.15;
+        moving = (Math.random() < 0.5)
+          ? { ax:1, ay:0, amp:TUNE.MOVE_AMP*rand(0.5,0.9), sp:TUNE.MOVE_SPEED*rand(0.8,1.2)*tierMul, ph:rand(0,6.28) }
+          : { ax:0, ay:1, amp:TUNE.MOVE_AMP*rand(0.4,0.7), sp:TUNE.MOVE_SPEED*rand(0.8,1.2)*tierMul, ph:rand(0,6.28) };
+      }
 
-    // optional movers
-    let moving = null;
-    if (arch === 'movers' && Math.random() < 0.6){
-      moving = (Math.random() < 0.5)
-        ? { ax:1, ay:0, amp:TUNE.MOVE_AMP*rand(0.5,0.9), sp:TUNE.MOVE_SPEED*rand(0.8,1.2), ph:rand(0,6.28) }
-        : { ax:0, ay:1, amp:TUNE.MOVE_AMP*rand(0.4,0.7), sp:TUNE.MOVE_SPEED*rand(0.8,1.2), ph:rand(0,6.28) };
-    }
+      const plat = addPlatform(x, y, w, U*0.8, pickPlatformType(!!moving), moving);
+      if (plat){
+        // traps (tier-weighted) + telegraph for flames
+        if (Math.random() < (altitude<=-1 ? 0.24 : 0.18)) addSpikes(plat.x + U*0.5, plat.y - 0.4*U, plat.w - U);
+        if (Math.random() < (altitude<=-1 ? 0.20 : 0.10)) addFlame(plat.x + plat.w*rand(0.25,0.7), plat.y - U*1.2);
 
-    const plat = addPlatform(x, y, w, U*0.8, pickPlatformType(!!moving), moving);
-    if (plat){
-      // traps (biome-weighted)
-      if (Math.random() < (biome === 'depths' ? 0.24 : 0.18)) addSpikes(plat.x + U*0.5, plat.y - 0.4*U, plat.w - U);
-      if (Math.random() < (biome === 'depths' ? 0.20 : 0.10)) addFlame(plat.x + plat.w*rand(0.25,0.7), plat.y - U*1.2);
-      // Add a DK-style connecting ladder sometimes, or when verticals get tall
-if (Math.random() < 0.35) tryAddConnectLadder(plat);
+        // DK-style connecting ladders to prevent unreachable tops
+        if (Math.random() < 0.35) tryAddConnectLadder(plat);
 
-      // ground enemies
-      if (Math.random() < enemySpawnChance()){
-        const ex = plat.x + plat.w*rand(0.25,0.7);
-        if (ex - player.pos.x > 6*U){
-          const type = (Math.random() < (biome === 'depths' ? 0.3 : 0.5)) ? 'soldier' : 'runner';
-          const ey   = type === 'runner' ? plat.y - 0.9*U : plat.y - 1.4*U;
-          if (!areaHasTrap(ex-0.2*U, ey-0.2*U, 1.2*U, 1.2*U)) enemies.push(new Enemy(ex, ey, type));
+        // ground enemies
+        if (Math.random() < enemySpawnChance()){
+          const ex = plat.x + plat.w*rand(0.25,0.7);
+          if (ex - player.pos.x > 6*U){
+            const type = (Math.random() < (altitude<=-1 ? 0.3 : 0.5)) ? 'soldier' : 'runner';
+            const ey   = type === 'runner' ? plat.y - 0.9*U : plat.y - 1.4*U;
+            if (!areaHasTrap(ex-0.2*U, ey-0.2*U, 1.2*U, 1.2*U)) enemies.push(new Enemy(ex, ey, type));
+          }
+        }
+
+        // coins
+        if (Math.random() < TUNE.COIN_CHANCE){
+          const pattern = irand(0,3);
+          if (pattern === 0){ for (let k=0;k<6;k++) spawnCoin(plat.x + (k+1)*(plat.w/7), plat.y - U*0.8 - Math.sin(k)*4*DPR); }
+          if (pattern === 1){ for (let k=0;k<4;k++) spawnCoin(plat.x + k*(plat.w/4),  plat.y - 1.2*U - k*2*DPR); }
+          if (pattern === 2){ for (let k=0;k<6;k++) spawnCoin(plat.x + k*(plat.w/6),  plat.y - 0.9*U); }
+        }
+
+        // HP & rare gem
+        if ((Math.random() < TUNE.HP_CHANCE || (plat.x - lastHPAt) > TUNE.HP_GUARANTEE_TILES*U) &&
+            !areaHasTrap(plat.x+U, plat.y-0.6*U, 0.7*U, 0.5*U)){
+          addHP(plat.x + plat.w*0.5, plat.y - 0.6*U); lastHPAt = plat.x;
+        }
+        if (((plat.x - lastGemAt) > irand(TUNE.GEM_MIN_TILES, TUNE.GEM_MAX_TILES)*U) && Math.random() < 0.6){
+          addGem(plat.x + plat.w*0.6, plat.y - 0.9*U, altitude>=1 ? 'sapphire' : 'ruby'); lastGemAt = plat.x;
+        }
+
+        // Big tier ladder: place once in the window (prefer mid-steps)
+        if (arch === 'tierLadder' && i >= 1 && i <= steps - 2){
+          // increase chance as we approach window end
+          const prog = clamp((tilesWalked - nextTierWinStart) / Math.max(1,(nextTierWinEnd-nextTierWinStart)), 0, 1);
+          if (Math.random() < (0.12 + 0.20*prog)){
+            let dir = 'up';
+            if (altitude >= TUNE.ALT_MAX) dir = 'down';
+            else if (altitude <= TUNE.ALT_MIN) dir = 'up';
+            else dir = (Math.random() < 0.5 ? 'up' : 'down');
+            addLadder(plat.x + plat.w*0.5 - 0.2*U, plat.y, 2.6*U, dir);
+            spawnedTierLadderThisWindow = true;
+            // schedule next window now so another appears ~200–400 tiles later
+            scheduleNextTierWindow(tilesWalked);
+          }
         }
       }
 
-      // coins
-      if (Math.random() < TUNE.COIN_CHANCE){
-        const pattern = irand(0,3);
-        if (pattern === 0){ for (let k=0;k<6;k++) spawnCoin(plat.x + (k+1)*(plat.w/7), plat.y - U*0.8 - Math.sin(k)*4*DPR); }
-        if (pattern === 1){ for (let k=0;k<4;k++) spawnCoin(plat.x + k*(plat.w/4),  plat.y - 1.2*U - k*2*DPR); }
-        if (pattern === 2){ for (let k=0;k<6;k++) spawnCoin(plat.x + k*(plat.w/6),  plat.y - 0.9*U); }
-      }
-
-      // HP (reduced) and rare gem
-      if ((Math.random() < TUNE.HP_CHANCE || (plat.x - lastHPAt) > TUNE.HP_GUARANTEE_TILES*U) &&
-          !areaHasTrap(plat.x+U, plat.y-0.6*U, 0.7*U, 0.5*U)){
-        addHP(plat.x + plat.w*0.5, plat.y - 0.6*U); lastHPAt = plat.x;
-      }
-      if (((plat.x - lastGemAt) > irand(TUNE.GEM_MIN_TILES, TUNE.GEM_MAX_TILES)*U) && Math.random() < 0.6){
-        addGem(plat.x + plat.w*0.6, plat.y - 0.9*U, biome === 'sky' ? 'sapphire' : 'ruby'); lastGemAt = plat.x;
-      }
-
-      // ladder chance in middle steps
-      if (arch === 'ladder' && i >= 1 && i <= steps - 2 && Math.random() < 0.2){
-        const dir = (Math.random() < 0.5) ? 'up' : 'down';
-        addLadder(plat.x + plat.w*0.5 - 0.2*U, plat.y, 2.2*U, dir);
-      }
+      x      += (plat ? (plat.w + gap) : gap);
+      lastTop = (plat ? plat.y : y) + irand(-U, U) * 0.2;
     }
 
-    x      += (plat ? (plat.w + gap) : gap);
-    lastTop = (plat ? plat.y : y) + irand(-U, U) * 0.2;
-  }
+    // safety floor and advance generator
+    addPlatform(genX - U*6, baseY + U*8, width + U*12, U, 'stone');
+    genX += width;
 
-  // safety floor and advance generator
-  addPlatform(genX - U*6, baseY + U*8, width + U*12, U, 'stone');
-  genX += width;
-
-  // flyers
-  if (player.dist >= TUNE.FLIER_UNLOCK_DIST && flyers.length < TUNE.FLIER_CAP){
-    const weight = biome === 'sky' ? 0.6 : biome === 'depths' ? 0.25 : 0.4;
-    if (Math.random() < weight){
-      const role = Math.random() < 0.5 ? 'swooper' : 'gunner';
-      const fx = cam.x + W + 2*U;
-      const fy = player.pos.y - 3*U + rand(-U, U);
-      flyers.push(new Flyer(fx, fy, role));
+    // flyers (more in sky/+2)
+    if (player.dist >= TUNE.FLIER_UNLOCK_DIST && flyers.length < TUNE.FLIER_CAP){
+      const weight = altitude>=1 ? 0.6 : altitude<=-1 ? 0.25 : 0.4;
+      if (Math.random() < weight){
+        const role = Math.random() < 0.5 ? 'swooper' : 'gunner';
+        const fx = cam.x + W + 2*U;
+        const fy = player.pos.y - 3*U + rand(-U, U);
+        flyers.push(new Flyer(fx, fy, role));
+      }
     }
   }
-}
 
   function seedWorld(){
     platforms.length = enemies.length = traps.length = bullets.length = hpPacks.length = coins.length = gems.length = flyers.length = ladders.length = 0;
-    genX=0; lastHPAt=0; lastGemAt=-99999; lastLadderAt=-99999;
+    genX=0; lastHPAt=0; lastGemAt=-99999;
     for(let i=0;i<4;i++) generateChunk();
   }
+
+  // ================== Music engine (crossfade, 5 tiers) ==================
+  const musicBtn = document.getElementById('musicBtn');
+  const musicA = document.getElementById('music'); // first element in DOM
+  const musicB = new Audio(); musicB.loop = true; musicB.preload = 'auto';
+  let activeAudio = musicA, idleAudio = musicB;
+  let musicEnabled = true;
+
+  function currentTrackURLForAlt(alt){
+    const key = String(clamp(alt, -2, 2));
+    return MUSIC_BASE + TRACKS[key];
+    }
+  function swapActive(){
+    const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp;
+  }
+  async function ensurePlay(el){ try{ await el.play(); }catch(e){ /* ignore, will try via button */ } }
+
+  function sameTrack(a, b) {
+  try {
+    const pa = new URL(a, location.href).pathname.split('/').pop();
+    const pb = new URL(b, location.href).pathname.split('/').pop();
+    return pa === pb;
+  } catch { return a === b; }
+}
+
+async function crossfadeTo(url, immediate=false){
+  if (!musicEnabled) return;
+
+  const curr = activeAudio.currentSrc || '';
+  if (curr && sameTrack(curr, url)) return; // already on this track
+
+  // Try dual-channel crossfade
+  idleAudio.src = url;
+  idleAudio.volume = 0.0;
+
+  let idlePlayable = true;
+  try { await idleAudio.play(); } catch (e) { idlePlayable = false; }
+
+  if (!idlePlayable) {
+    // Fallback: single-channel hard switch (no crossfade, but guaranteed to start)
+    activeAudio.src = url;
+    activeAudio.volume = 0.35;
+    try { await activeAudio.play(); } catch {}
+    return;
+  }
+
+  const FADE_MS = immediate ? 0 : 1500;
+  const start = performance.now();
+  const startVol = activeAudio.volume ?? 0.35;
+  const targetVol = 0.35;
+
+  function step(now){
+    const t = Math.min(1, (now - start)/FADE_MS || 1);
+    activeAudio.volume = startVol * (1 - t);
+    idleAudio.volume   = targetVol * t;
+    if (t < 1) { requestAnimationFrame(step); }
+    else {
+      activeAudio.pause();
+      // swap channels
+      const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp;
+    }
+  }
+  requestAnimationFrame(step);
+}
+
+
+  async function playTrackForAlt(alt, {immediate=false}={}){
+    const url = currentTrackURLForAlt(alt);
+    await crossfadeTo(url, immediate);
+    musicBtn.textContent='Music ON';
+    musicBtn.classList.add('toggled');
+  }
+
+  function toggleMusic(){
+  musicEnabled = !musicEnabled;
+  if (musicEnabled){
+    if (!activeAudio.currentSrc) {
+      // If no track yet, lock to the current tier’s track
+      const url = currentTrackURLForAlt(altitude);
+      activeAudio.src = url;
+    }
+    activeAudio.volume = 0.35;
+    activeAudio.play().catch(e => console.warn('toggle play blocked', e));
+    musicBtn.textContent='Music ON';
+    musicBtn.classList.add('toggled');
+  } else {
+    activeAudio.pause(); idleAudio.pause();
+    musicBtn.textContent='Music OFF';
+    musicBtn.classList.remove('toggled');
+  }
+  saveSettings();
+}
+
 
   // ================== Game lifecycle & UI ==================
   let player;
@@ -954,7 +1061,6 @@ if (Math.random() < 0.35) tryAddConnectLadder(plat);
   const overlay = document.getElementById('overlay');
   const startBtn = document.getElementById('startBtn');
   const pauseBtn = document.getElementById('pauseBtn');
-  const musicBtn = document.getElementById('musicBtn');
   const nightBtn = document.getElementById('nightBtn');
   const hpFill = document.getElementById('hpFill');
   const scoreChip = document.getElementById('scoreChip');
@@ -962,44 +1068,39 @@ if (Math.random() < 0.35) tryAddConnectLadder(plat);
   const distChip = document.getElementById('distChip');
   const heartsEl = document.getElementById('hearts');
   const pausedTag = document.getElementById('pausedTag');
-  const musicEl = document.getElementById('music');
-  
-  musicEl.addEventListener('error', () => {
-  console.warn('Music load/play error:', musicEl.error);
-  toast('Music load error — check MUSIC_URL/path', 1800);
-});
 
-// Optional: also see when it actually starts
-musicEl.addEventListener('play', () => console.log('Music playing'));
-musicEl.addEventListener('pause', () => console.log('Music paused'));
+  // basic audio event logs (active channel only)
+  function reportAudio(el){
+    const ns = ['EMPTY','IDLE','LOADING','NO_SOURCE'][el.networkState] || el.networkState;
+    const rs = ['HAVE_NOTHING','HAVE_METADATA','HAVE_CURRENT_DATA','HAVE_FUTURE_DATA','HAVE_ENOUGH_DATA'][el.readyState] || el.readyState;
+    console.log('Audio state:', {currentSrc: el.currentSrc, networkState: ns, readyState: rs, error: el.error});
+  }
+  ['error','loadedmetadata','canplay','canplaythrough','play','pause','stalled'].forEach(ev =>
+    musicA.addEventListener(ev, () => { console.log('[audio A]', ev); reportAudio(musicA); })
+  );
 
-  musicEl.imageSmoothingEnabled = false;
-
-
-// On Start (starts game + fades music in)
-startBtn.onclick = async () => {
+  startBtn.onclick = async () => {
   initAudio();
   try { await ac?.resume(); } catch {}
 
   startGame();
 
-  try {
-    // set the source exactly once here
-    if (musicEl.src !== MUSIC_URL) musicEl.src = MUSIC_URL;
-    musicEl.volume = 0.0;
-    await musicEl.play();                       // user gesture -> should be allowed
-    musicBtn.textContent = 'Music ON';
-    musicBtn.classList.add('toggled');
+  // Play the correct track for the current tier immediately (single element).
+  const firstURL = currentTrackURLForAlt(altitude);
+  activeAudio.src = firstURL;
+  activeAudio.volume = 0.35;
 
-    // fade in
-    let v = 0;
-    const id = setInterval(() => {
-      v += 0.05;
-      musicEl.volume = Math.min(0.35, v);
-      if (v >= 0.35) clearInterval(id);
-    }, 80);
+  musicEnabled = true;
+  musicBtn.textContent = 'Music ON';
+  musicBtn.classList.add('toggled');
+
+  try {
+    await activeAudio.play(); // direct, user-gesture playback
   } catch (err) {
-    console.warn('Music play blocked:', err?.name || err, err);
+    console.warn('Autoplay blocked on first play:', err);
+    musicEnabled = false;
+    musicBtn.textContent = 'Music OFF';
+    musicBtn.classList.remove('toggled');
     toast('Click “Music ON” to start audio', 1600);
   }
 };
@@ -1008,31 +1109,18 @@ startBtn.onclick = async () => {
   pauseBtn.onclick = togglePause;
   musicBtn.onclick = toggleMusic;
   nightBtn.onclick = ()=>setNight(!isNight);
-  
+
   function renderHearts(n){ heartsEl.innerHTML=''; for(let i=0;i<n;i++){ const d=document.createElement('div'); d.className='heart'; heartsEl.appendChild(d); } }
 
   function startGame(){
     player = new Player(); altitude=0; biome='ground';
+    scheduleNextTierWindow(0);
     seedWorld();
     cam.x = player.pos.x - W*0.3; cam.y = player.pos.y - H*0.55;
     overlay.style.display='none'; running=true; paused=false; pausedTag.style.display='none';
+    rebuildBGs();
   }
   function togglePause(){ if(!running) return; paused=!paused; pauseBtn.classList.toggle('toggled',paused); pausedTag.style.display=paused?'block':'none'; }
-  function toggleMusic(){
-  if (!MUSIC_URL){ alert('Set MUSIC_URL first'); return; }
-  if (musicEl.paused){
-    musicEl.volume = 0.35;
-    musicEl.play().then(() => {
-      musicBtn.textContent='Music ON';
-      musicBtn.classList.add('toggled');
-    }).catch(err => console.warn('toggle play blocked', err));
-  } else {
-    musicEl.pause();
-    musicBtn.textContent='Music OFF';
-    musicBtn.classList.remove('toggled');
-  }
-  saveSettings();
-}
   function setNight(v){ isNight=v; nightBtn.classList.toggle('toggled',v); nightBtn.textContent = v ? '🌙 Night' : '☀️ Day'; rebuildBGs(); saveSettings(); }
 
   function gameOver(){
@@ -1049,87 +1137,97 @@ startBtn.onclick = async () => {
   }
 
   function loadSettings(){ try{ return JSON.parse(localStorage.getItem(SETTINGS_KEY)||'{}'); }catch{ return {}; } }
-  function saveSettings(){ const s=loadSettings(); s.night=isNight; s.musicOn=!musicEl.paused && !!MUSIC_URL; localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); }
-  function reportAudio(){
-  const ns = ['EMPTY','IDLE','LOADING','NO_SOURCE'][musicEl.networkState] || musicEl.networkState;
-  const rs = ['HAVE_NOTHING','HAVE_METADATA','HAVE_CURRENT_DATA','HAVE_FUTURE_DATA','HAVE_ENOUGH_DATA'][musicEl.readyState] || musicEl.readyState;
-  console.log('Audio state:', {currentSrc: musicEl.currentSrc, networkState: ns, readyState: rs, error: musicEl.error});
-}
-['error','loadedmetadata','canplay','canplaythrough','play','pause','stalled'].forEach(ev =>
-  musicEl.addEventListener(ev, () => { console.log('[audio]', ev); reportAudio(); })
-);
-
-// ================== Main loop ==================
-function loop(t=0){
-  requestAnimationFrame(loop);
-  if(!running) return;
-
-  const dt = t - last; last = t; fps = 1000 / Math.max(1, dt);
-
-  if (paused){ drawFrame(); return; }
-
-  // Move moving platforms; compute dx/dy for carry/crush safety
-  for (const p of platforms){
-    p.dx = 0; p.dy = 0;
-    if (p.moving){
-      const oldX = p.x, oldY = p.y;
-      const tt = performance.now()/1000 * p.moving.sp + p.moving.ph;
-      const nx = p.x0 + (p.moving.ax ? Math.sin(tt)*p.moving.amp : 0);
-      const ny = p.y0 + (p.moving.ay ? Math.sin(tt)*p.moving.amp : 0);
-      // crush-prevention
-      let ok = true;
-      for (const q of platforms){
-        if (q === p || !q.solid) continue;
-        const pr = {x:nx,y:ny,w:p.w,h:p.h}, qr = {x:q.x,y:q.y,w:q.w,h:q.h};
-        const inter = !(pr.x+pr.w<=qr.x || pr.x>=qr.x+qr.w || pr.y+pr.h<=qr.y || pr.y>=qr.y+qr.h);
-        if (inter){ ok = false; break; }
-      }
-      if (ok){ p.x = nx; p.y = ny; p.dx = p.x - oldX; p.dy = p.y - oldY; }
-    }
+  function saveSettings(){
+    const s=loadSettings();
+    s.night=isNight;
+    s.musicOn=musicEnabled;
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
   }
 
-  // Camera follows player
-  cam.x += (player.pos.x - W*0.35 - cam.x)*0.06;
-  cam.y += (player.pos.y - H*0.58 - cam.y)*0.05;
+  // ================== Main loop ==================
+  function loop(t=0){
+    requestAnimationFrame(loop);
+    if(!running) return;
 
-  // generate more
-  while (genX - cam.x < W*1.2) generateChunk();
+    const dt = t - last; last = t; fps = 1000 / Math.max(1, dt);
 
-  player.update();
-  if (player.pos.y - cam.y > H + 80*DPR) player.fallDeath();
+    if (paused){ drawFrame(); return; }
 
-  for (const e of enemies) e.update();
-  for (const f of flyers)  f.update();
-  for (const b of bullets) b.update();
-  for (const t2 of traps) if (t2.type==='flame'){ t2.t += 0.02; t2.active = (Math.sin(t2.t*Math.PI*2*1.2) > 0.2); }
-
-  // ladders: enter on overlap + input (W for up, S for down)
-  for (const L of ladders){
-  const r = new Rect(L.x, L.y, L.w, L.h);
-  if (!player.onLadder && player.rect().intersects(r)){
-    if (L.dir === 'link'){
-      if (input.up || input.down){
-        player.onLadder = L; player.ladderT = 0;
-        player.ladderDir = input.down ? 'down' : 'up';
+    // Move moving platforms; compute dx/dy for carry/crush safety
+    for (const p of platforms){
+      p.dx = 0; p.dy = 0;
+      if (p.moving){
+        const oldX = p.x, oldY = p.y;
+        const tt = performance.now()/1000 * p.moving.sp + p.moving.ph;
+        const nx = p.x0 + (p.moving.ax ? Math.sin(tt)*p.moving.amp : 0);
+        const ny = p.y0 + (p.moving.ay ? Math.sin(tt)*p.moving.amp : 0);
+        // crush-prevention vs other solids
+        let ok = true;
+        for (const q of platforms){
+          if (q === p || !q.solid) continue;
+          const pr = {x:nx,y:ny,w:p.w,h:p.h}, qr = {x:q.x,y:q.y,w:q.w,h:q.h};
+          const inter = !(pr.x+pr.w<=qr.x || pr.x>=qr.x+qr.w || pr.y+pr.h<=qr.y || pr.y>=qr.y+qr.h);
+          if (inter){ ok = false; break; }
+        }
+        if (ok){ p.x = nx; p.y = ny; p.dx = p.x - oldX; p.dy = p.y - oldY; }
       }
-    } else if ((L.dir === 'up' && input.up) || (L.dir === 'down' && input.down)){
-      player.onLadder = L; player.ladderT = 0;
-      player.ladderDir = L.dir; // only used for animation direction
     }
+
+    // Camera
+    cam.x += (player.pos.x - W*0.35 - cam.x)*0.06;
+    cam.y += (player.pos.y - H*0.58 - cam.y)*0.05;
+
+    // generate more
+    while (genX - cam.x < W*1.2) generateChunk();
+
+    player.update();
+
+    // fall-death safeguard
+    const FALL_TILES = 12;
+    if (!player.onGround && !player.onLadder) {
+      if (player.pos.y > player.lastSafe.y + FALL_TILES * U) {
+        player.fallDeath();
+      }
+    }
+
+    for (const e of enemies) e.update();
+    for (const f of flyers)  f.update();
+    for (const b of bullets) b.update();
+
+    // traps update (flame telegraph)
+    for (const t2 of traps) if (t2.type==='flame'){
+      t2.t += 0.02;
+      const s = Math.sin(t2.t*Math.PI*2*1.2);
+      t2.warn = (s > 0.1);
+      t2.active = (s > 0.28);
+    }
+
+    // ladders: enter on overlap + input
+    for (const L of ladders){
+      const r = new Rect(L.x, L.y, L.w, L.h);
+      if (!player.onLadder && player.rect().intersects(r)){
+        if (L.dir === 'link'){
+          if (input.up || input.down){
+            player.onLadder = L; player.ladderT = 0;
+            player.ladderDir = input.down ? 'down' : 'up';
+          }
+        } else if ((L.dir === 'up' && input.up) || (L.dir === 'down' && input.down)){
+          player.onLadder = L; player.ladderT = 0;
+          player.ladderDir = L.dir;
+        }
+      }
+    }
+
+    // cull offscreen / dead things
+    for (let i=bullets.length-1;i>=0;i--) if (bullets[i].life<=0) bullets.splice(i,1);
+    for (let i=enemies.length-1;i>=0;i--) if (!enemies[i].alive && Math.random()<0.02) enemies.splice(i,1);
+    for (let i=flyers.length-1;i>=0;i--)  if (!flyers[i].alive  && Math.random()<0.03) flyers.splice(i,1);
+    for (let i=hpPacks.length-1;i>=0;i--){ const h=hpPacks[i]; if (toScreenX(h.x+h.w)<-200) hpPacks.splice(i,1); }
+    for (let i=coins.length-1;i>=0;i--){ const c=coins[i]; if (toScreenX(c.x)    <-200) coins.splice(i,1); }
+    for (let i=gems.length-1;i>=0;i--){  const g=gems[i];  if (toScreenX(g.x)    <-200) gems.splice(i,1); }
+
+    drawFrame();
   }
-}
-
-
-  // cull offscreen / dead things
-  for (let i=bullets.length-1;i>=0;i--) if (bullets[i].life<=0) bullets.splice(i,1);
-  for (let i=enemies.length-1;i>=0;i--) if (!enemies[i].alive && Math.random()<0.02) enemies.splice(i,1);
-  for (let i=flyers.length-1;i>=0;i--)  if (!flyers[i].alive  && Math.random()<0.03) flyers.splice(i,1);
-  for (let i=hpPacks.length-1;i>=0;i--){ const h=hpPacks[i]; if (toScreenX(h.x+h.w)<-200) hpPacks.splice(i,1); }
-  for (let i=coins.length-1;i>=0;i--){ const c=coins[i]; if (toScreenX(c.x)    <-200) coins.splice(i,1); }
-  for (let i=gems.length-1;i>=0;i--){  const g=gems[i];  if (toScreenX(g.x)    <-200) gems.splice(i,1); }
-
-  drawFrame();
-}
 
   function drawWorld(){
     // platforms
@@ -1148,6 +1246,10 @@ function loop(t=0){
       } else if (t.type==='flame'){
         // base
         ctx.fillStyle = '#6b3a2a'; ctx.fillRect(sx, sy+t.h-4*DPR, t.w, 4*DPR);
+        // glow/warn
+        if (t.warn && !t.active){
+          ctx.globalAlpha = 0.35; ctx.fillStyle='#ffb55a'; ctx.fillRect(sx, sy, t.w, t.h*0.8); ctx.globalAlpha = 1;
+        }
         // particles when active
         if (t.active){
           for(let i=0;i<12;i++){
@@ -1163,42 +1265,38 @@ function loop(t=0){
         for(let i=0;i<teeth;i++){ const x=sx+(i/teeth)*t.w; ctx.beginPath(); ctx.moveTo(x,sy+t.h); ctx.lineTo(x+t.w/teeth/2,sy); ctx.lineTo(x+t.w/teeth,sy+t.h); ctx.fill(); }
       }
     }
-    
-    
+
     function drawCoin(c){
-  const sx = toScreenX(c.x)|0, sy = toScreenY(c.y)|0;
-  const R  = c.r;
-  // fake flip: horizontal radius oscillates
-  const phase = (Math.sin(c.t) + 1) * 0.5;                   // 0..1
-  const rx = Math.max(2*DPR, R*(0.35 + 0.65*phase));
-  const ry = R;
+      c.t += c.spin || 0.1;
+      const sx = toScreenX(c.x)|0, sy = toScreenY(c.y)|0;
+      const R  = c.r;
+      const phase = (Math.sin(c.t) + 1) * 0.5;
+      const rx = Math.max(2*DPR, R*(0.35 + 0.65*phase));
+      const ry = R;
 
-  ctx.save();
-  ctx.translate((sx+R)|0, (sy+R)|0);
+      ctx.save();
+      ctx.translate((sx+R)|0, (sy+R)|0);
 
-  ctx.beginPath();
-  ctx.ellipse(0,0, rx, ry, 0, 0, Math.PI*2);
-  ctx.fillStyle = '#ffd75a';     // gold fill
-  ctx.fill();
-  ctx.lineWidth = 1*DPR;
-  ctx.strokeStyle = '#c99a2f';   // rim
-  ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0,0, rx, ry, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#ffd75a';
+      ctx.fill();
+      ctx.lineWidth = 1*DPR;
+      ctx.strokeStyle = '#c99a2f';
+      ctx.stroke();
 
-  // inner shine
-  ctx.globalAlpha = 0.6;
-  ctx.beginPath();
-  ctx.ellipse(-rx*0.25, -ry*0.15, rx*0.35, ry*0.35, 0, 0, Math.PI*2);
-  ctx.fillStyle = '#fff6b0';
-  ctx.fill();
-  ctx.globalAlpha = 1;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.ellipse(-rx*0.25, -ry*0.15, rx*0.35, ry*0.35, 0, 0, Math.PI*2);
+      ctx.fillStyle = '#fff6b0';
+      ctx.fill();
+      ctx.globalAlpha = 1;
 
-  // center ridge
-  ctx.fillStyle = '#caa032';
-  ctx.fillRect(-rx*0.1, -ry*0.6, 2*DPR, ry*1.2);
+      ctx.fillStyle = '#caa032';
+      ctx.fillRect(-rx*0.1, -ry*0.6, 2*DPR, ry*1.2);
 
-  ctx.restore();
-}
-
+      ctx.restore();
+    }
 
     // ladders
     for (const L of ladders){
@@ -1207,10 +1305,9 @@ function loop(t=0){
       ctx.fillRect(sx, sy, L.w, L.h);
       ctx.fillStyle='#d1a774';
       for(let y=0;y<L.h;y+=10*DPR) ctx.fillRect(sx-4*DPR, sy+y, L.w+8*DPR, 2*DPR);
-      // tip arrow
       ctx.fillStyle='#e8f0ff';
       if (L.dir==='up'){ ctx.fillRect(sx+L.w+4*DPR, sy, 2*DPR, 8*DPR); ctx.fillRect(sx+L.w+2*DPR, sy+2*DPR, 6*DPR, 2*DPR); }
-      else { ctx.fillRect(sx+L.w+4*DPR, sy+L.h-8*DPR, 2*DPR, 8*DPR); ctx.fillRect(sx+L.w+2*DPR, sy+L.h-4*DPR, 6*DPR, 2*DPR); }
+      else if (L.dir==='down'){ ctx.fillRect(sx+L.w+4*DPR, sy+L.h-8*DPR, 2*DPR, 8*DPR); ctx.fillRect(sx+L.w+2*DPR, sy+L.h-4*DPR, 6*DPR, 2*DPR); }
     }
 
     // hp packs
@@ -1221,11 +1318,9 @@ function loop(t=0){
       ctx.fillRect(sx+2*DPR, sy+h.h/2-2*DPR, h.w-4*DPR, 4*DPR);
     }
 
-    // coins
+    // coins/gems/enemies/bullets/player
     for (const c of coins) drawCoin(c);
 
-
-    // gems
     for (const g of gems){
       const sx=toScreenX(g.x), sy=toScreenY(g.y);
       ctx.fillStyle = g.kind==='ruby'? '#ff6a5a' : '#5ad1ff';
@@ -1233,7 +1328,6 @@ function loop(t=0){
       ctx.fillStyle='#e8f0ff'; ctx.fillRect(sx+2*DPR, sy+2*DPR, g.w-4*DPR, 2*DPR);
     }
 
-    // enemies & flyers & bullets & player
     for(const e of enemies) if(e.alive) e.draw();
     for(const f of flyers)  if(f.alive) f.draw();
     for(const b of bullets) b.draw();
@@ -1251,13 +1345,13 @@ function loop(t=0){
     hpFill.style.width = clamp(player.hp,0,100)+'%';
     renderHearts(player.lives);
 
-    // Debug
     if (debug){
-      ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(10,10,240,78);
+      ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(10,10,300,94);
       ctx.fillStyle='#e8f0ff'; ctx.font=`${12*DPR}px monospace`;
       ctx.fillText(`FPS: ${fps.toFixed(0)}`, 20, 28);
       ctx.fillText(`Enemies: ${enemies.length} + Fliers: ${flyers.length}`, 20, 44);
       ctx.fillText(`Bullets: ${bullets.length} • Alt: ${altitude} (${biome})`, 20, 60);
+      ctx.fillText(`Tier win: ${nextTierWinStart}|${nextTierWinEnd} • seen=${spawnedTierLadderThisWindow}`, 20, 76);
     }
   }
 
@@ -1266,7 +1360,9 @@ function loop(t=0){
     resize();
     const s=loadSettings();
     setNight(!!s.night);
-    if (s.musicOn && MUSIC_URL){ musicEl.volume=0.35; musicEl.play().catch(()=>{}); musicBtn.textContent='Music ON'; musicBtn.classList.add('toggled'); }
+    musicEnabled = !!s.musicOn;
+    musicBtn.textContent = musicEnabled ? 'Music ON' : 'Music OFF';
+    musicBtn.classList.toggle('toggled', musicEnabled);
     nightBtn.classList.toggle('toggled', isNight);
   }
 
@@ -1279,4 +1375,3 @@ function loop(t=0){
 </script>
 </body>
 </html>
-
