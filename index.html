@@ -52,8 +52,8 @@
   <div id="overlay">
     <div class="card">
       <h1>Pixel Outrider</h1>
-      <p>WASD/Space to move & jump • Mouse to aim • Click to shoot • P to Pause • H for debug</p>
-      <p>3 lives • Respawn at last ground • Enemies only shoot when visible • HP packs restore 25%</p>
+      <p>WASD/Space move & jump • Mouse to aim • LMB shoot • <b>RMB/Q charge beam</b> • <b>Shift dash</b> • P pause • H debug</p>
+      <p>3 lives • Respawn at last safe ground • HP packs +25% • Boss every ~600 tiles</p>
       <div class="actions"><button id="startBtn">Start</button></div>
     </div>
   </div>
@@ -68,7 +68,7 @@
   const DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
   const U = 24 * DPR;
 
-  // 5-tier soundtrack map
+  // soundtrack
   const MUSIC_BASE = "https://cdn.jsdelivr.net/gh/esteves7771/Pixel-Outrider@main/";
   const TRACKS = {
     "-2": "dark-descent-dark-ambience-230662.mp3",
@@ -77,6 +77,7 @@
     "1":  "relaxed-day-futuristic-chill-250712.mp3",
     "2":  "nice-ambient-futuristic-chill-250714.mp3"
   };
+  const MUSIC_BOSS = MUSIC_BASE + "video-game-boss-fiight-259885.mp3";
 
   let ac, master;
   function initAudio(){
@@ -104,6 +105,10 @@
     COYOTE_FRAMES: 6, JUMP_BUFFER_FRAMES: 6,
     // Player fire
     FIRE_CD_MIN: 20, FIRE_CD_MAX: 22, PLAYER_BULLET_SPEED: 14.5,
+    // Charge beam
+    CHARGE_TIME: 48, CHARGE_COOLDOWN: 180, CHARGE_DMG: 260, CHARGE_SPEED: 22,
+    // Dash
+    DASH_SPEED: 16, DASH_FRAMES: 12, DASH_CD_FRAMES: 72,
     // Enemy fire
     ENEMY_BULLET_SPEED: 10, ENEMY_CD_MIN: 180, ENEMY_CD_MAX: 240,
     ENEMY_WINDUP: [16,20], AIM_JITTER_DEG: 4, ENEMY_VIEW_FRAMES: 12,
@@ -117,7 +122,9 @@
     // Fliers
     FLIER_UNLOCK_DIST: 500 * U, FLIER_CAP: 3,
     // Biomes / tiers
-    ALT_MIN: -2, ALT_MAX: 2
+    ALT_MIN: -2, ALT_MAX: 2,
+    // Boss
+    BOSS_INTERVAL_TILES: 600
   };
 
   // ================== Canvas ==================
@@ -160,14 +167,15 @@
     if (DOWN_CODES.has(e.code)) input.down = false;
   });
 
-  let mouse = {x:0,y:0,down:false};
+  const mouse = {x:0,y:0,left:false,right:false};
   canvas.addEventListener('mousemove', e => {
     const r = canvas.getBoundingClientRect();
     mouse.x = (e.clientX - r.left) * DPR;
     mouse.y = (e.clientY - r.top)  * DPR;
   });
-  canvas.addEventListener('mousedown', ()=>mouse.down=true);
-  addEventListener('mouseup', ()=>mouse.down=false);
+  canvas.addEventListener('contextmenu', e=>e.preventDefault());
+  canvas.addEventListener('mousedown', e=>{ if(e.button===0) mouse.left=true; if(e.button===2) mouse.right=true; });
+  addEventListener('mouseup', e=>{ if(e.button===0) mouse.left=false; if(e.button===2) mouse.right=false; });
 
   // ================== Helpers ==================
   const cam = {x:0,y:0};
@@ -182,8 +190,9 @@
   function toast(msg, t=1200){ const el=document.getElementById('toast'); el.textContent=msg; el.style.display='block'; setTimeout(()=>el.style.display='none', t); }
 
   // ================== Data ==================
-  const platforms=[], traps=[], enemies=[], bullets=[], hpPacks=[], coins=[], gems=[], flyers=[], ladders=[];
+  const platforms=[], traps=[], enemies=[], bullets=[], hpPacks=[], coins=[], gems=[], flyers=[], ladders=[], birds=[];
   let genX=0, lastHPAt=0, lastGemAt= -99999, isNight=false, biome='ground', altitude=0;
+  let suppressSpawns=false;
 
   // big-ladder spawn window management
   let nextTierWinStart=Infinity, nextTierWinEnd=Infinity, spawnedTierLadderThisWindow=false;
@@ -194,97 +203,178 @@
   }
 
   // ================== Sprites ==================
-  function drawSprite(bitmap, palette, x,y, scale=2){
-    const px = Math.max(1, Math.floor(scale*DPR));
-    for(let j=0;j<bitmap.length;j++){
-      const row = bitmap[j];
-      for(let i=0;i<row.length;i++){
-        const c=row[i]; if (c==='.') continue;
-        ctx.fillStyle = palette[c] || '#000';
-        ctx.fillRect((x+i*px)|0, (y+j*px)|0, px, px);
-      }
+function drawSprite(bitmap, palette, x,y, scale=2){
+  const px = Math.max(1, Math.floor(scale*DPR));
+  for(let j=0;j<bitmap.length;j++){
+    const row = bitmap[j];
+    for(let i=0;i<row.length;i++){
+      const c=row[i]; if (c==='.') continue;
+      ctx.fillStyle = palette[c] || '#000';
+      ctx.fillRect((x+i*px)|0, (y+j*px)|0, px, px);
     }
   }
+}
+function drawSpriteFlipX(bitmap, palette, x,y, scale=2){
+  const px = Math.max(1, Math.floor(scale*DPR));
+  for(let j=0;j<bitmap.length;j++){
+    const row = bitmap[j];
+    for(let i=0;i<row.length;i++){
+      const c=row[i]; if (c==='.') continue;
+      // mirror column
+      const mi = (row.length-1)-i;
+      ctx.fillStyle = palette[c] || '#000';
+      ctx.fillRect((x+mi*px)|0, (y+j*px)|0, px, px);
+    }
+  }
+}
 
-  const palPlayer = {'0':'#0e1726','1':'#2b3a55','2':'#7dd3fc','3':'#c9f2ff','4':'#ff6d8a','5':'#f0b090','6':'#1b2744'};
-  const bmpPlayer = [
-    "...22222222...",
-    "...23333332...",
-    "..2333333332..",
-    "..2333333332..",
-    "...23333332...",
-    "....233332.....",
-    "..1113333111..",
-    ".133333333331.",
-    ".133333333331.",
-    ".133366633331.",
-    "..1333333331..",
-    "...13333331...",
-    "....111111....",
-    "....111111...."
-  ];
-  const palSoldier = {'0':'#0e1726','1':'#22324e','2':'#c7b8ff','3':'#ff7aa2','4':'#91a0ff'};
-  const bmpSoldier = [
-    "...22222222...",
-    "..2333333332..",
-    "..2333333332..",
-    "...23333332...",
-    "...23333332...",
-    ".111133331111.",
-    ".133333333331.",
-    ".133333333331.",
-    ".133334443331.",
-    "..1333333331..",
-    "...11111111..."
-  ];
-  const palRunner = {'a':'#f4b38e','b':'#d98c66','0':'#0e1726'};
-  const bmpRunner = [
-    "...aaaaaaaaaa...",
-    "..aaaaaaaaaaaa..",
-    ".aaaaaaaaaaaaaa.",
-    ".aaaaaaaaaaaaaa.",
-    "aaaaaaaaaaaaaaaa",
-    ".aaaaaaaaaaaaaa.",
-    ".aaaaaaaaaaaaaa.",
-    "..aaaaaaaaaaaa..",
-    "...bbbbbbbbbb..."
-  ];
+// New hero (chunkier, more detail)
+const palPlayer = {
+  'o':'#0a0e19', // outline
+  's':'#f2c6a2', // skin
+  'h':'#ffd36a', // hair
+  't':'#7dd3fc', // shirt/cyber vest
+  'b':'#394a6b', // pants/boots
+  'd':'#1b2744', // deep shadow
+  'w':'#cfeaff', // highlight
+  'r':'#ff6d8a'  // accent
+};
+// 18w x 22h
+const bmpPlayer = [
+  "......hhh.......",
+  ".....hhhhh......",
+  "....hhhshhh.....",
+  "...hhsssss hh...",
+  "...hsssssss h...",
+  "...hsswssshh....",
+  "....osssooo.....",
+  "...o ssss  o....",
+  "..o tttttt  o...",
+  "..o tttttt  o...",
+  "..o tttttt  o...",
+  "..o tttttt  o...",
+  "..o tttttt  o...",
+  "...o bbbb o.....",
+  "...o bbbb o.....",
+  "...o bbbb o.....",
+  "..o b    b o....",
+  "..o b    b o....",
+  "..o b    b o....",
+  "...o      o.....",
+  "....oooooo......",
+  "................"
+];
 
-  const palFlyer = {'r':'#ff4d6d','R':'#ff9bb0','w':'#ffffff','k':'#0e1726'};
-  const bmpFlyerWingUp = [
-    "...rrrRrrr...",
-    "..rrrrrrrr..",
-    ".rrrrrrrrrr.",
-    ".rrrrwrrrrr.",
-    "rrrrr rrrrrr",
-    ".rrrrrrrrrr.",
-    "..rrrrrrrr..",
-    "...rrrRrrr..",
-    "....r...r..."
-  ];
-  const bmpFlyerWingDn = [
-    "...rrrRrrr...",
-    "..rrrrrrrr..",
-    ".rrrrrrrrrr.",
-    ".rrrrwrrrrr.",
-    "rrrrr rrrrrr",
-    "..rrrrrrrr..",
-    "...rrrrrr...",
-    "....rrrr....",
-    ".....r......"
-  ];
+// Enemies you already had (soldier/runner) — keep them:
+const palSoldier = {'0':'#0e1726','1':'#22324e','2':'#c7b8ff','3':'#ff7aa2','4':'#91a0ff'};
+const bmpSoldier = [
+  "...22222222...",
+  "..2333333332..",
+  "..2333333332..",
+  "...23333332...",
+  "...23333332...",
+  ".111133331111.",
+  ".133333333331.",
+  ".133333333331.",
+  ".133334443331.",
+  "..1333333331..",
+  "...11111111..."
+];
+const palRunner = {'a':'#f4b38e','b':'#d98c66','0':'#0e1726'};
+const bmpRunner = [
+  "...aaaaaaaaaa...",
+  "..aaaaaaaaaaaa..",
+  ".aaaaaaaaaaaaaa.",
+  ".aaaaaaaaaaaaaa.",
+  "aaaaaaaaaaaaaaaa",
+  ".aaaaaaaaaaaaaa.",
+  ".aaaaaaaaaaaaaa.",
+  "..aaaaaaaaaaaa..",
+  "...bbbbbbbbbb..."
+];
+
+// Flyers (keep)
+const palFlyer = {'r':'#ff4d6d','R':'#ff9bb0','w':'#ffffff','k':'#0e1726'};
+const bmpFlyerWingUp = [
+  "...rrrRrrr...",
+  "..rrrrrrrr..",
+  ".rrrrrrrrrr.",
+  ".rrrrwrrrrr.",
+  "rrrrr rrrrrr",
+  ".rrrrrrrrrr.",
+  "..rrrrrrrr..",
+  "...rrrRrrr..",
+  "....r...r..."
+];
+const bmpFlyerWingDn = [
+  "...rrrRrrr...",
+  "..rrrrrrrr..",
+  ".rrrrrrrrrr.",
+  ".rrrrwrrrrr.",
+  "rrrrr rrrrrr",
+  "..rrrrrrrr..",
+  "...rrrrrr...",
+  "....rrrr....",
+  ".....r......"
+];
+
+// Flame — 4 frames (always visible)
+const palFlame = { 'y':'#ffdca8','o':'#ff9a3e','r':'#f2522e','d':'#6b3a2a' };
+const FLAME_FRAMES = [
+  [
+    ".....y......",
+    "....yoy.....",
+    "...yooo.....",
+    "..yoooor....",
+    "...yooo.....",
+    "....yo......",
+    ".....y......",
+  ],
+  [
+    ".....y......",
+    "....yoy.....",
+    "...yoooy....",
+    "..yoooorr...",
+    "...yooo.....",
+    "....yo......",
+    ".....y......",
+  ],
+  [
+    ".....y......",
+    "....yo......",
+    "...yoooy....",
+    "..yoooorr...",
+    "...yoooy....",
+    "....yoy.....",
+    ".....y......",
+  ],
+  [
+    ".....y......",
+    "....yoy.....",
+    "...yoooy....",
+    "..yoooorr...",
+    "...yoooy....",
+    "....yo......",
+    ".....y......",
+  ],
+];
+
 
   // ================== Classes ==================
   class Rect { constructor(x,y,w,h){ this.x=x; this.y=y; this.w=w; this.h=h; }
     get left(){return this.x;} get right(){return this.x+this.w;}
     get top(){return this.y;}  get bottom(){return this.y+this.h;}
+    contains(px,py){ return px>=this.left&&px<=this.right&&py>=this.top&&py<=this.bottom; }
     intersects(o){ return this.right>o.left && this.left<o.right && this.bottom>o.top && this.top<o.bottom; } }
 
+  // ---------- Player ----------
   class Player {
     constructor(){
       this.pos = {x:2*U, y:-6*U};
       this.size = {w:0.9*U, h:1.5*U};
       this.vel  = {x:0, y:0};
+      this.face = 1;
+
       this.ladderDir = null;
       this.hp=100; this.alive=true; this.score=0; this.dist=0; this.coins=0;
       this.fireCD=0; this.iframes=0; this.lives=3;
@@ -295,11 +385,47 @@
       this.magnet  = 0;
       this.onLadder = null;
       this.ladderT  = 0;
+
+      // dash
+      this.dashT=0; this.dashCD=0;
+      // charge beam
+      this.charging=false; this.chargeT=0; this.chargeCD=0;
+      this.trail=[];
     }
     rect(){ return new Rect(this.pos.x, this.pos.y, this.size.w, this.size.h); }
 
     update(){
       if(!this.alive) return;
+
+      // Dash start
+      if (this.dashCD<=0 && this.dashT<=0 && (keys.has('shiftleft')||keys.has('shiftright'))){
+        this.dashT = TUNE.DASH_FRAMES;
+        this.dashCD = TUNE.DASH_CD_FRAMES;
+        this.iframes = Math.max(this.iframes, TUNE.DASH_FRAMES+6);
+      }
+      if (this.dashCD>0) this.dashCD--;
+
+      // Charge beam logic
+      const wantCharge = mouse.right || keys.has('keyq');
+      if (!this.charging && this.chargeCD<=0 && wantCharge){
+        this.charging = true; this.chargeT = 0;
+      }
+      if (this.charging){
+        this.chargeT++;
+        if (!wantCharge){ // release
+          if (this.chargeT >= TUNE.CHARGE_TIME){
+            const aim = Math.atan2(mouse.y - toScreenY(this.pos.y+this.size.h/2), mouse.x - toScreenX(this.pos.x+this.size.w/2));
+            const spd=TUNE.CHARGE_SPEED*DPR;
+            const bx=this.pos.x+this.size.w/2+Math.cos(aim)*this.size.w*0.6;
+            const by=this.pos.y+this.size.h/2+Math.sin(aim)*this.size.h*0.4;
+            bullets.push(new Bullet(bx,by,Math.cos(aim)*spd,Math.sin(aim)*spd,true,TUNE.CHARGE_DMG,2)); // pierce 2
+            this.chargeCD = TUNE.CHARGE_COOLDOWN;
+          }
+          this.charging=false; this.chargeT=0;
+        }
+      } else {
+        if (this.chargeCD>0) this.chargeCD--;
+      }
 
       // Ladder handling
       if (this.onLadder){
@@ -324,7 +450,6 @@
             rebuildBGs();
             toast(altitude>oldAlt ? `Tier +${altitude}` : `Tier ${altitude}`, 1000);
             playTrackForAlt(altitude, {immediate:false});
-            // new big-ladder window starts from where we are now
             scheduleNextTierWindow(this.dist / U);
           }
           this.onLadder = null; this.ladderT = 0; this.ladderDir = null;
@@ -335,16 +460,25 @@
         if (keys.has('keya')||keys.has('arrowleft'))  this.vel.x -= TUNE.ACCEL*DPR;
         if (keys.has('keyd')||keys.has('arrowright')) this.vel.x += TUNE.ACCEL*DPR;
 
+        if (this.vel.x>0.1) this.face=1; else if (this.vel.x<-0.1) this.face=-1;
+
         // Jump buffering / coyote
         if (input.jumpPressed){ this.jumpBuf = TUNE.JUMP_BUFFER_FRAMES; input.jumpPressed = false; }
         if (this.coyote>0 && this.jumpBuf>0){ this.vel.y = -TUNE.JUMP*DPR; this.onGround=false; this.coyote=0; this.jumpBuf=0; }
         if (this.jumpBuf>0) this.jumpBuf--;
 
         // Physics
-        this.vel.y += TUNE.GRAV*DPR;
-        this.vel.x = clamp(this.vel.x, -TUNE.MAX_VX*DPR, TUNE.MAX_VX*DPR);
+        const dashing = this.dashT>0;
+        if (dashing){
+          this.dashT--;
+          this.vel.x = (this.face>0?1:-1) * TUNE.DASH_SPEED*DPR;
+          // trail
+          this.trail.push({x:this.pos.x, y:this.pos.y, a:0.6});
+          if (this.trail.length>8) this.trail.shift();
+        }
+        this.vel.y += TUNE.GRAV*DPR * (dashing?0.3:1);
+        this.vel.x = clamp(this.vel.x, -TUNE.MAX_VX*DPR*1.2, TUNE.MAX_VX*DPR*1.2);
 
-        // Clamp fall to reduce tunneling
         const MAX_FALL = 22 * DPR;
         if (this.vel.y > MAX_FALL) this.vel.y = MAX_FALL;
 
@@ -409,11 +543,10 @@
           ? (this.groundedOn && this.groundedOn.moving ? 0.80 : 0.86)
           : 0.96;
 
-        // Traps (flames only hurt when active)
-        if (this.iframes>0) this.iframes--;
-        else for (const t of traps){
-          if (t.type==='flame' && !t.active) continue;
-          const tr = new Rect(t.x,t.y,t.w,t.h);
+        // Traps (flames are always active/visible now)
+          if (this.iframes>0) this.iframes--;
+          else for (const t of traps){
+            const tr = new Rect(t.x,t.y,t.w,t.h);
           if (this.rect().intersects(tr)){ this.damage(20); this.iframes=90; break; }
         }
 
@@ -454,17 +587,22 @@
         // Shooting
         if (this.fireCD>0) this.fireCD--;
         const aim = Math.atan2(mouse.y - toScreenY(this.pos.y+this.size.h/2), mouse.x - toScreenX(this.pos.x+this.size.w/2));
-        if (mouse.down && this.fireCD<=0){
+        if (mouse.left && this.fireCD<=0 && !this.charging){
           const spd=TUNE.PLAYER_BULLET_SPEED*DPR;
           const bx=this.pos.x+this.size.w/2+Math.cos(aim)*this.size.w*0.6;
           const by=this.pos.y+this.size.h/2+Math.sin(aim)*this.size.h*0.4;
-          bullets.push(new Bullet(bx,by,Math.cos(aim)*spd,Math.sin(aim)*spd,true));
+          bullets.push(new Bullet(bx,by,Math.cos(aim)*spd,Math.sin(aim)*spd,true,34,0));
           this.fireCD = irand(TUNE.FIRE_CD_MIN,TUNE.FIRE_CD_MAX);
         }
 
         this.score += Math.max(0, this.vel.x*0.01) * (this.scoreX2>0?2:1);
         this.dist = Math.max(this.dist, this.pos.x);
         if (this.damageMeter>0) this.damageMeter = Math.max(0, this.damageMeter-0.3);
+      }
+
+      // clamp to boss arena if active
+      if (boss.active){
+        this.pos.x = clamp(this.pos.x, boss.arenaL + 0.5*U, boss.arenaR - this.size.w - 0.5*U);
       }
     }
     damage(n){ this.hp-=n; this.damageMeter += n; if (this.hp<=0) this.consumeLife(); }
@@ -477,50 +615,127 @@
       } else { this.hp=0; this.alive=false; gameOver(); }
     }
     fallDeath(){ this.consumeLife(); }
-    draw(){
-      const sx=toScreenX(this.pos.x)|0, sy=toScreenY(this.pos.y)|0;
-      if (isNight){ ctx.fillStyle='rgba(0,0,0,0.35)'; drawSprite(bmpPlayer, {'2':'rgba(0,0,0,0.35)'}, sx-1, sy-1, 2); }
-      drawSprite(bmpPlayer, palPlayer, sx, sy, 2);
-      const dir = (mouse.x > sx + this.size.w/2) ? 1 : -1;
-      ctx.fillStyle='#c7b8ff';
-      ctx.fillRect(sx + this.size.w/2 + dir*6*DPR, sy + this.size.h/2, 8*DPR*dir, 2*DPR);
-      if (this.scoreX2>0){ ctx.fillStyle='#ff9b5a'; ctx.fillRect(sx-8*DPR, sy, 6*DPR, 6*DPR); }
-      if (this.magnet>0){ ctx.fillStyle='#5ad1ff'; ctx.fillRect(sx-8*DPR, sy+8*DPR, 6*DPR, 6*DPR); }
-    }
+      draw(){
+  const sx = toScreenX(this.pos.x)|0;
+  const sy = toScreenY(this.pos.y)|0;
+
+  // dash trail
+  for (let i=this.trail.length-1;i>=0;i--){
+    const t=this.trail[i];
+    ctx.globalAlpha = t.a; t.a *= 0.76;
+    (this.face>0 ? drawSprite : drawSpriteFlipX)(
+      bmpPlayer,
+      {'t':'rgba(125,211,252,0.5)','o':'rgba(10,14,25,0.35)','b':'rgba(57,74,107,0.35)','s':'rgba(242,198,162,0.4)'},
+      toScreenX(t.x), toScreenY(t.y), 2
+    );
+    ctx.globalAlpha=1;
+    if (t.a<0.05) this.trail.splice(i,1);
   }
 
+  // face toward mouse (mirror)
+  const facingRight = mouse.x > sx + this.size.w/2;
+  this.face = facingRight ? 1 : -1;
+  const paint = facingRight ? drawSprite : drawSpriteFlipX;
+
+  if (isNight){ ctx.globalAlpha=0.35; paint(bmpPlayer, palPlayer, sx-1, sy-1, 2); ctx.globalAlpha=1; }
+  paint(bmpPlayer, palPlayer, sx, sy, 2);
+
+  // blaster
+  ctx.fillStyle = this.charging ? '#ffe88a' : '#c7b8ff';
+  const dir = this.face;
+  ctx.fillRect(sx + this.size.w/2 + dir*6*DPR, sy + this.size.h/2, 8*DPR*dir, 2*DPR);
+
+  // charge glow
+  if (this.charging){
+    const glow = clamp((this.chargeT / TUNE.CHARGE_TIME),0,1);
+    ctx.globalAlpha = 0.25 + glow*0.5;
+    ctx.fillStyle = '#ffe88a';
+    ctx.beginPath();
+    ctx.arc(sx+this.size.w/2, sy+this.size.h/2, 10*DPR*(0.6+glow), 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  if (this.scoreX2>0){ ctx.fillStyle='#ff9b5a'; ctx.fillRect(sx-8*DPR, sy, 6*DPR, 6*DPR); }
+  if (this.magnet>0){ ctx.fillStyle='#5ad1ff'; ctx.fillRect(sx-8*DPR, sy+8*DPR, 6*DPR, 6*DPR); }
+  }
+}
+  // ---------- Bullet ----------
   class Bullet {
-    constructor(x,y,vx,vy,friendly){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.friendly=friendly; this.life=120; this.r=2*DPR; }
+    constructor(x,y,vx,vy,friendly,dmg=12,pierce=0){ this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.friendly=friendly; this.life=180; this.r=2*DPR; this.dmg=dmg; this.pierce=pierce; }
     update(){
       this.x+=this.vx; this.y+=this.vy;
-      for(const p of platforms){ if(!p.solid) continue; if(this.x>p.x&&this.x<p.x+p.w&&this.y>p.y&&this.y<p.y+p.h){ this.life=0; return; } }
+      // stop on solid for non-piercing friendly (piercing ignores platforms)
+      if (!this.friendly || this.pierce<=0){
+        for(const p of platforms){ if(!p.solid) continue; if(this.x>p.x&&this.x<p.x+p.w&&this.y>p.y&&this.y<p.y+p.h){ this.life=0; return; } }
+      }
       if (this.friendly){
+        // bosses
+        if (boss.active && boss.entity && boss.entity.alive){
+          if (this.x>boss.entity.x&&this.x<boss.entity.x+boss.entity.w&&this.y>boss.entity.y&&this.y<boss.entity.y+boss.entity.h){
+            boss.hit(this.dmg);
+            if (this.pierce>0){ this.pierce--; } else { this.life=0; }
+            return;
+          }
+        }
         for(const e of enemies){ if(!e.alive) continue;
-          if (this.x>e.x&&this.x<e.x+e.w&&this.y>e.y&&this.y<e.y+e.h){ e.hp-=34; this.life=0; if(e.hp<=0){ e.alive=false; player.score += (player.scoreX2>0?50:25); } return; }
+          if (this.x>e.x&&this.x<e.x+e.w&&this.y>e.y&&this.y<e.y+e.h){
+            e.hp-=this.dmg;
+            if(e.hp<=0){ e.alive=false; player.score += (player.scoreX2>0?50:25); }
+            if (this.pierce>0){ this.pierce--; } else { this.life=0; }
+            return;
+          }
         }
         for(const f of flyers){ if(!f.alive) continue;
-          if (this.x>f.x&&this.x<f.x+f.w&&this.y>f.y&&this.y<f.y+f.h){ f.hp-=34; this.life=0; if(f.hp<=0){ f.alive=false; player.score += (player.scoreX2>0?70:35); if(Math.random()<0.2) spawnCoin(f.x+f.w/2, f.y-6*DPR); } return; }
+          if (this.x>f.x&&this.x<f.x+f.w&&this.y>f.y&&this.y<f.y+f.h){
+            f.hp-=this.dmg;
+            if(f.hp<=0){ f.alive=false; player.score += (player.scoreX2>0?70:35); if(Math.random()<0.2) spawnCoin(f.x+f.w/2, f.y-6*DPR); }
+            if (this.pierce>0){ this.pierce--; } else { this.life=0; }
+            return;
+          }
         }
       } else {
         const r=player.rect();
-        if (this.x>r.left&&this.x<r.right&&this.y>r.top&&this.y<r.bottom){ if(player.iframes<=0) player.damage(12); this.life=0; return; }
+        if (this.x>r.left&&this.x<r.right&&this.y>r.top&&this.y<r.bottom){ if(player.iframes<=0) player.damage(this.dmg); this.life=0; return; }
       }
       this.life--;
     }
     draw(){
       const sx=toScreenX(this.x), sy=toScreenY(this.y);
-      ctx.beginPath(); ctx.arc(sx,sy,this.r,0,Math.PI*2); ctx.fillStyle = this.friendly?'#ffe88a':'#ff6d8a'; ctx.fill();
+      ctx.beginPath(); ctx.arc(sx,sy,this.r*(this.pierce>0?1.3:1),0,Math.PI*2); ctx.fillStyle = this.friendly?'#ffe88a':'#ff6d8a'; ctx.fill();
       ctx.globalAlpha=0.35; ctx.beginPath(); ctx.moveTo(sx - this.vx*0.5, sy - this.vy*0.5); ctx.lineTo(sx,sy);
       ctx.lineWidth=3*DPR; ctx.strokeStyle=this.friendly?'#fff2b3':'#ff9bb0'; ctx.stroke(); ctx.globalAlpha=1;
     }
   }
 
+  // ---------- Enemies ----------
   class Enemy {
     constructor(x,y,type='soldier'){
       this.kind='ground';
       this.type=type; this.x=x; this.y=y; this.w=(type==='runner'?1.0:0.9)*U; this.h=(type==='runner'?0.9:1.4)*U;
       this.vx=rand(-0.18,0.18)*DPR; this.vy=0; this.hp=(type==='runner')?50:60; this.alive=true;
       this.shootCD=irand(TUNE.ENEMY_CD_MIN,TUNE.ENEMY_CD_MAX); this.windup=0; this.visibleFrames=0; this.blockedFrames=0;
+    }
+    floorAhead(dir){
+      const fx = this.x + (dir>0 ? this.w+2*DPR : -2*DPR);
+      const fy = this.y + this.h + 6*DPR;
+      for(const p of platforms){ if(!p.solid) continue;
+        if (fx>=p.x && fx<=p.x+p.w && Math.abs(fy - p.y) <= 8*DPR) return true;
+      }
+      return false;
+    }
+    shortGapHop(dir){
+      // is there a platform within a small gap?
+      const edgeX = this.x + (dir>0? this.w : 0);
+      let best=null;
+      for(const p of platforms){
+        if(!p.solid) continue;
+        const gap = p.x - edgeX;
+        if (dir<0) continue; // simple forward-only hop
+        if (gap>0 && gap<0.8*U && Math.abs(p.y - (this.y+this.h)) < 0.5*U){ best=p; break; }
+      }
+      if (best){ this.vx += 0.6*DPR*dir; this.vy = -6*DPR; return true; }
+      return false;
     }
     platformCollide(){
       this.vy += (TUNE.GRAV*0.9)*DPR; this.x += this.vx; this.y += this.vy;
@@ -540,6 +755,15 @@
     }
     update(){
       if(!this.alive) return;
+
+      // avoid falling
+      if (Math.abs(this.vx)>0.02){
+        const dir = this.vx>0?1:-1;
+        if (!this.floorAhead(dir)){
+          if (!this.shortGapHop(dir)) this.vx *= -0.8; // turn
+        }
+      }
+
       this.platformCollide();
 
       const dx=(player.pos.x+player.size.w/2)-(this.x+this.w/2);
@@ -559,7 +783,7 @@
           if (this.windup===1){
             const jitter=deg2rad(rand(-TUNE.AIM_JITTER_DEG,TUNE.AIM_JITTER_DEG));
             const a=Math.atan2(dy,dx)+jitter, sp=TUNE.ENEMY_BULLET_SPEED*DPR;
-            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a)*sp,Math.sin(a)*sp,false));
+            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a)*sp,Math.sin(a)*sp,false,12,0));
           }
         } else { this.windup=0; }
       }
@@ -567,6 +791,7 @@
     draw(){ const sx=toScreenX(this.x)|0, sy=toScreenY(this.y)|0; if(this.type==='runner') drawSprite(bmpRunner,palRunner,sx,sy,2); else drawSprite(bmpSoldier,palSoldier,sx,sy,2); }
   }
 
+  // ---------- Flyers ----------
   class Flyer {
     constructor(x,y,role='swooper'){
       this.kind='flyer';
@@ -625,8 +850,8 @@
           else { this.windup=irand(14,18); this.shootCD=irand(160,220); }
           if (this.windup===1){
             const a=Math.atan2(dy,dx)+deg2rad(rand(-3,3)), sp=TUNE.ENEMY_BULLET_SPEED*DPR;
-            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a)*sp,Math.sin(a)*sp,false));
-            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a+deg2rad(4))*sp,Math.sin(a+deg2rad(4))*sp,false));
+            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a)*sp,Math.sin(a)*sp,false,12,0));
+            if (enemyBulletCount()<TUNE.ENEMY_BULLET_CAP) bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a+deg2rad(4))*sp,Math.sin(a+deg2rad(4))*sp,false,12,0));
           }
         } else this.windup=0;
       }
@@ -641,6 +866,7 @@
 
   // ================== World / Traps / Pickups ==================
   function addPlatform(x,y,w,h,type='grass', moving=null){
+    // avoid stacking too close
     for (const p of platforms){
       const overlapX = !(x+w < p.x+0.5*U || x > p.x+p.w-0.5*U);
       const tooCloseY = Math.abs((y)-(p.y)) < 0.8*U;
@@ -650,21 +876,21 @@
     platforms.push(obj);
     return obj;
   }
-  function addSaw(x,y){ traps.push({x,y,w:U*0.9,h:U*0.9,type:'saw',t:rand(0,6.28)}); }
-  function addSpikes(x,y,w){ traps.push({x,y,w,h:U*0.4,type:'spike'}); }
-  function addFlame(x,y){ traps.push({x,y,w:U*0.8,h:U*1.2,type:'flame',t:0,active:false,warn:false}); }
-  function addHP(x,y){ hpPacks.push({x,y,w:0.7*U,h:0.5*U}); }
+  function addSaw(x,y){ if (suppressSpawns) return; traps.push({x,y,w:U*0.9,h:U*0.9,type:'saw',t:rand(0,6.28)}); }
+  function addSpikes(x,y,w){ if (suppressSpawns) return; traps.push({x,y,w,h:U*0.4,type:'spike'}); }
+  function addFlame(x,y){ if (suppressSpawns) return; traps.push({x,y,w:U*0.8,h:U*1.2,type:'flame',t:0,frame:0}); }
+  function addHP(x,y){ if (suppressSpawns) return; hpPacks.push({x,y,w:0.7*U,h:0.5*U}); }
   function spawnCoin(x,y){
+    if (suppressSpawns) return;
     for (let i=coins.length-1;i>=Math.max(0, coins.length-12);i--){
       const c=coins[i]; const dx=c.x-x, dy=c.y-y;
       if (dx*dx + dy*dy < (0.55*U)*(0.55*U)) return;
     }
     coins.push({ x:x-0.28*U, y:y-0.28*U, r:0.28*U, vx:0, vy:0, t:0, spin:rand(0.08,0.12) });
   }
-  function addGem(x,y,kind){ gems.push({x,y,w:0.6*U,h:0.6*U,kind}); }
+  function addGem(x,y,kind){ if (suppressSpawns) return; gems.push({x,y,w:0.6*U,h:0.6*U,kind}); }
   function addLadder(x,y,h,dir){ ladders.push({x:x+0.2*U,y:y-h, w:0.4*U, h, dir}); }
 
-  // link/rescue ladder between overlapping platforms (no tier shift)
   function tryAddConnectLadder(lower){
     let pick = null;
     for (const up of platforms){
@@ -709,7 +935,7 @@
     } else if (altitude === 1){
       b = isNightMode ? ['#081220','#0d1a2e','#13223d','#19304f'] : ['#1a54f2','#2f6ff8','#4b8cff','#63c3cf'];
     } else if (altitude === 0){
-      b = isNightMode ? ['#0b121f','#111a2b','#18243a','#1f2e49'] : ['#15335f','#1d467f','#23539a','#2b66bb']; // slightly darker ground
+      b = isNightMode ? ['#0b121f','#111a2b','#18243a','#1f2e49'] : ['#15335f','#1d467f','#23539a','#2b66bb'];
     } else if (altitude === -1){
       b = isNightMode ? ['#0a0d16','#0f1320','#151a2a','#1b2235'] : ['#11182a','#151f36','#1a2742','#213051'];
     } else {
@@ -734,7 +960,7 @@
       // clouds
       ctx2.fillStyle = isNightMode ? '#cfd9ff' : '#ffffff';
       for(let i=0;i<12;i++){ const cx=(i*120+40)%w, cy=50+(i%4)*14; ctx2.fillRect(cx,cy,60,10); ctx2.fillRect(cx-10,cy+10,80,10); ctx2.fillRect(cx+15,cy+20,30,10); }
-      // birds
+      // birds silhouettes in BG (static layer)
       ctx2.fillStyle = isNightMode ? '#b0c4ff' : '#2b3a55';
       for(let i=0;i<10;i++){ const x=(i*150+30)%w, y=70+(i%3)*16; ctx2.fillRect(x,y,8,2); ctx2.fillRect(x+10,y+2,6,2); }
     } else if (altitude <= -1){
@@ -777,6 +1003,29 @@
       g.addColorStop(0,`rgba(0,0,0,${vig})`);
       g.addColorStop(1,`rgba(0,0,0,${vig*1.2})`);
       ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+    }
+  }
+
+  // Ambient birds (foreground little sprites)
+  class AmbientBird {
+    constructor(side){
+      this.side=side;
+      this.x = side==='L' ? cam.x - 40*DPR : cam.x + W + 40*DPR;
+      this.y = cam.y + H*0.25 + rand(-H*0.15, H*0.05);
+      this.vx = (side==='L'?1:-1) * rand(1.2,1.8)*DPR;
+      this.flap=0; this.life= irand(480, 720);
+      this.palette = [{b:'#6b7cff',o:'#ffad66'},{b:'#aae3ff',o:'#6bd6b3'},{b:'#ff6b6b',o:'#ffd166'}][irand(0,3)];
+    }
+    update(){
+      this.x += this.vx; this.flap = (this.flap+1)%20; this.life--;
+    }
+    draw(){
+      const sx=toScreenX(this.x), sy=toScreenY(this.y);
+      if (sx<-40||sx>W+40) return;
+      ctx.fillStyle='#0e1726';
+      ctx.fillRect(sx,sy,6*DPR,3*DPR);
+      ctx.fillStyle=this.palette.b; ctx.fillRect(sx+1*DPR, sy- (this.flap<10?1:0)*DPR, 4*DPR,2*DPR);
+      ctx.fillStyle=this.palette.o; ctx.fillRect(sx+5*DPR, sy+1*DPR, 1*DPR,1*DPR);
     }
   }
 
@@ -872,7 +1121,7 @@
       if (arch === 'stairs')  y += (i % 2 ? -U*0.8 : U*0.8);
       if (arch !== 'tierLadder' && i === bumpAt) y += (Math.random() < 0.5 ? -U : +U);
 
-      // movers (35% faster overall; tier flavor)
+      // movers
       let moving = null;
       if (arch === 'movers' && Math.random() < 0.6){
         const tierMul = altitude>=1 ? 1.35 : altitude<=-1 ? 0.9 : 1.15;
@@ -883,15 +1132,15 @@
 
       const plat = addPlatform(x, y, w, U*0.8, pickPlatformType(!!moving), moving);
       if (plat){
-        // traps (tier-weighted) + telegraph for flames
-        if (Math.random() < (altitude<=-1 ? 0.24 : 0.18)) addSpikes(plat.x + U*0.5, plat.y - 0.4*U, plat.w - U);
-        if (Math.random() < (altitude<=-1 ? 0.20 : 0.10)) addFlame(plat.x + plat.w*rand(0.25,0.7), plat.y - U*1.2);
+        if (!suppressSpawns){
+          if (Math.random() < (altitude<=-1 ? 0.24 : 0.18)) addSpikes(plat.x + U*0.5, plat.y - 0.4*U, plat.w - U);
+          if (Math.random() < (altitude<=-1 ? 0.20 : 0.10)) addFlame(plat.x + plat.w*rand(0.25,0.7), plat.y - U*1.2);
+        }
 
-        // DK-style connecting ladders to prevent unreachable tops
         if (Math.random() < 0.35) tryAddConnectLadder(plat);
 
         // ground enemies
-        if (Math.random() < enemySpawnChance()){
+        if (!suppressSpawns && Math.random() < enemySpawnChance()){
           const ex = plat.x + plat.w*rand(0.25,0.7);
           if (ex - player.pos.x > 6*U){
             const type = (Math.random() < (altitude<=-1 ? 0.3 : 0.5)) ? 'soldier' : 'runner';
@@ -901,7 +1150,7 @@
         }
 
         // coins
-        if (Math.random() < TUNE.COIN_CHANCE){
+        if (!suppressSpawns && Math.random() < TUNE.COIN_CHANCE){
           const pattern = irand(0,3);
           if (pattern === 0){ for (let k=0;k<6;k++) spawnCoin(plat.x + (k+1)*(plat.w/7), plat.y - U*0.8 - Math.sin(k)*4*DPR); }
           if (pattern === 1){ for (let k=0;k<4;k++) spawnCoin(plat.x + k*(plat.w/4),  plat.y - 1.2*U - k*2*DPR); }
@@ -909,17 +1158,16 @@
         }
 
         // HP & rare gem
-        if ((Math.random() < TUNE.HP_CHANCE || (plat.x - lastHPAt) > TUNE.HP_GUARANTEE_TILES*U) &&
+        if (!suppressSpawns && (Math.random() < TUNE.HP_CHANCE || (plat.x - lastHPAt) > TUNE.HP_GUARANTEE_TILES*U) &&
             !areaHasTrap(plat.x+U, plat.y-0.6*U, 0.7*U, 0.5*U)){
           addHP(plat.x + plat.w*0.5, plat.y - 0.6*U); lastHPAt = plat.x;
         }
-        if (((plat.x - lastGemAt) > irand(TUNE.GEM_MIN_TILES, TUNE.GEM_MAX_TILES)*U) && Math.random() < 0.6){
+        if (!suppressSpawns && ((plat.x - lastGemAt) > irand(TUNE.GEM_MIN_TILES, TUNE.GEM_MAX_TILES)*U) && Math.random() < 0.6){
           addGem(plat.x + plat.w*0.6, plat.y - 0.9*U, altitude>=1 ? 'sapphire' : 'ruby'); lastGemAt = plat.x;
         }
 
-        // Big tier ladder: place once in the window (prefer mid-steps)
-        if (arch === 'tierLadder' && i >= 1 && i <= steps - 2){
-          // increase chance as we approach window end
+        // Big tier ladder
+        if (!suppressSpawns && arch === 'tierLadder' && i >= 1 && i <= steps - 2){
           const prog = clamp((tilesWalked - nextTierWinStart) / Math.max(1,(nextTierWinEnd-nextTierWinStart)), 0, 1);
           if (Math.random() < (0.12 + 0.20*prog)){
             let dir = 'up';
@@ -928,7 +1176,6 @@
             else dir = (Math.random() < 0.5 ? 'up' : 'down');
             addLadder(plat.x + plat.w*0.5 - 0.2*U, plat.y, 2.6*U, dir);
             spawnedTierLadderThisWindow = true;
-            // schedule next window now so another appears ~200–400 tiles later
             scheduleNextTierWindow(tilesWalked);
           }
         }
@@ -942,8 +1189,8 @@
     addPlatform(genX - U*6, baseY + U*8, width + U*12, U, 'stone');
     genX += width;
 
-    // flyers (more in sky/+2)
-    if (player.dist >= TUNE.FLIER_UNLOCK_DIST && flyers.length < TUNE.FLIER_CAP){
+    // flyers
+    if (!suppressSpawns && player.dist >= TUNE.FLIER_UNLOCK_DIST && flyers.length < TUNE.FLIER_CAP){
       const weight = altitude>=1 ? 0.6 : altitude<=-1 ? 0.25 : 0.4;
       if (Math.random() < weight){
         const role = Math.random() < 0.5 ? 'swooper' : 'gunner';
@@ -955,14 +1202,120 @@
   }
 
   function seedWorld(){
-    platforms.length = enemies.length = traps.length = bullets.length = hpPacks.length = coins.length = gems.length = flyers.length = ladders.length = 0;
+    platforms.length = enemies.length = traps.length = bullets.length = hpPacks.length = coins.length = gems.length = flyers.length = ladders.length = birds.length = 0;
     genX=0; lastHPAt=0; lastGemAt=-99999;
     for(let i=0;i<4;i++) generateChunk();
+
+    // spawn area cleanup (no traps right at start)
+    const safe = new Rect((player?.pos?.x ?? 2*U) - 2*U, -8*U, 6*U, 6*U);
+    for (let i=traps.length-1;i>=0;i--){
+      const t=traps[i]; if (safe.intersects(new Rect(t.x,t.y,t.w,t.h))) traps.splice(i,1);
+    }
   }
 
-  // ================== Music engine (crossfade, 5 tiers) ==================
+  // ================== Boss Manager ==================
+  const boss = {
+    active:false, entity:null, arenaL:0, arenaR:0, nextAt:TUNE.BOSS_INTERVAL_TILES,
+    start(){
+      this.active=true;
+      suppressSpawns=true;
+      const mid = player.pos.x + 10*U;
+      this.arenaL = mid - W*0.6; this.arenaR = mid + W*0.6;
+      this.entity = new BossDuelist(mid + 0.2*W, player.pos.y - 2*U);
+      crossfadeTo(MUSIC_BOSS, true);
+      toast('⚠️ Boss Incoming!', 1200);
+    },
+    hit(dmg){ if(!this.entity) return; this.entity.hp-=dmg; if(this.entity.hp<=0){ this.entity.alive=false; this.win(); } },
+    win(){
+      toast('Arena cleared!', 1400);
+      // little reward burst
+      for (let i=0;i<16;i++) spawnCoin(player.pos.x+rand(-U,U), player.pos.y - rand(0,U));
+      this.active=false; suppressSpawns=false; this.entity=null;
+      this.nextAt += TUNE.BOSS_INTERVAL_TILES;
+      playTrackForAlt(altitude,{immediate:false});
+    },
+    update(){
+      if(!this.active) return;
+      if (this.entity && this.entity.alive) this.entity.update();
+    },
+    draw(){
+  if(!this.active) return;
+  if (this.entity) this.entity.draw();
+
+  if (!this.entity) return;
+  const hp = Math.max(0,this.entity.hp), max = this.entity.maxHp;
+  const pct = clamp(hp/max,0,1);
+
+  // anchor above boss
+  const bx = toScreenX(this.entity.x + this.entity.w/2);
+  const by = toScreenY(this.entity.y) - 16*DPR;
+
+  const barW = 120*DPR, barH = 8*DPR;
+  const x = clamp(bx - barW/2, 8*DPR, W - barW - 8*DPR);
+  const y = Math.max(8*DPR, by);
+
+  ctx.fillStyle='rgba(16,26,50,.85)'; ctx.fillRect(x, y, barW, barH);
+  ctx.fillStyle='#ff6d8a'; ctx.fillRect(x, y, barW*pct, barH);
+  ctx.strokeStyle='rgba(255,255,255,.25)'; ctx.lineWidth=2; ctx.strokeRect(x, y, barW, barH);
+}
+  };
+
+  class BossDuelist {
+    constructor(x,y){
+      this.x=x; this.y=y; this.w=1.6*U; this.h=2.2*U;
+      this.hp=this.maxHp=800; this.alive=true;
+      this.t=0; this.vx=0; this.vy=0; this.phase=0; this.cool=60;
+    }
+    update(){
+      this.t++;
+      // simple hover + dash strikes + spreads
+      const px=player.pos.x+player.size.w/2, py=player.pos.y+player.size.h/2;
+      const dx=px-(this.x+this.w/2), dy=py-(this.y+this.h/2);
+      // hover
+      const tx = clamp(px + Math.cos(this.t*0.02)*1.2*U, boss.arenaL+1.2*U, boss.arenaR-1.8*U);
+      const ty = py - 2.6*U + Math.sin(this.t*0.04)*0.6*U;
+      this.vx += clamp(tx - this.x, -3*U, 3*U) * 0.012*DPR;
+      this.vy += clamp(ty - this.y, -3*U, 3*U) * 0.012*DPR;
+      this.vx = clamp(this.vx, -2.2*DPR, 2.2*DPR);
+      this.vy = clamp(this.vy, -2.0*DPR, 2.0*DPR);
+      this.x += this.vx; this.y += this.vy;
+
+      // attacks
+      if (this.cool>0) this.cool--;
+      else {
+        if (this.phase===0){ // spread
+          const a=Math.atan2(dy,dx);
+          for (const off of [-0.15,-0.07,0,0.07,0.15]){
+            const sp=TUNE.ENEMY_BULLET_SPEED*1.1*DPR;
+            bullets.push(new Bullet(this.x+this.w/2,this.y+this.h/2,Math.cos(a+off)*sp,Math.sin(a+off)*sp,false,14,0));
+          }
+          this.cool = 70;
+          this.phase=1;
+        } else { // dash slash (melee)
+          const dir = Math.sign(dx)||1;
+          this.vx += dir*4.5*DPR; this.vy += Math.sign(dy)*1.2*DPR;
+          // melee hitbox
+          if (new Rect(this.x-0.3*U, this.y, this.w+0.6*U, this.h).intersects(player.rect()) && player.iframes<=0){
+            player.damage(18);
+          }
+          this.cool = 50; this.phase=0;
+        }
+      }
+    }
+    draw(){
+      const sx=toScreenX(this.x)|0, sy=toScreenY(this.y)|0;
+      // simple tall sprite body
+      ctx.fillStyle='#ff6a5a'; ctx.fillRect(sx,sy,this.w,this.h);
+      ctx.fillStyle='#2b3a55'; ctx.fillRect(sx+this.w*0.2, sy+this.h*0.8, this.w*0.6, this.h*0.2);
+      // horns-ish
+      ctx.fillStyle='#7dd3fc'; ctx.fillRect(sx-4*DPR, sy+4*DPR, 4*DPR, 10*DPR);
+      ctx.fillRect(sx+this.w, sy+4*DPR, 4*DPR, 10*DPR);
+    }
+  }
+
+  // ================== Music engine ==================
   const musicBtn = document.getElementById('musicBtn');
-  const musicA = document.getElementById('music'); // first element in DOM
+  const musicA = document.getElementById('music');
   const musicB = new Audio(); musicB.loop = true; musicB.preload = 'auto';
   let activeAudio = musicA, idleAudio = musicB;
   let musicEnabled = true;
@@ -970,88 +1323,77 @@
   function currentTrackURLForAlt(alt){
     const key = String(clamp(alt, -2, 2));
     return MUSIC_BASE + TRACKS[key];
+  }
+  async function crossfadeTo(url, immediate=false){
+    if (!musicEnabled) return;
+    const curr = activeAudio.currentSrc || '';
+    const same = (()=>{ try{ const pa=new URL(curr, location.href).pathname.split('/').pop(); const pb=new URL(url, location.href).pathname.split('/').pop(); return pa===pb; }catch{ return curr===url; }})();
+    if (curr && same) return;
+
+    idleAudio.src = url;
+    idleAudio.volume = 0.0;
+
+    let idlePlayable = true;
+    try { await idleAudio.play(); } catch (e) { idlePlayable = false; }
+
+    if (!idlePlayable) {
+      activeAudio.src = url; activeAudio.volume = 0.35; try{ await activeAudio.play(); }catch{}
+      return;
     }
-  function swapActive(){
-    const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp;
-  }
-  async function ensurePlay(el){ try{ await el.play(); }catch(e){ /* ignore, will try via button */ } }
 
-  function sameTrack(a, b) {
-  try {
-    const pa = new URL(a, location.href).pathname.split('/').pop();
-    const pb = new URL(b, location.href).pathname.split('/').pop();
-    return pa === pb;
-  } catch { return a === b; }
-}
-
-async function crossfadeTo(url, immediate=false){
-  if (!musicEnabled) return;
-
-  const curr = activeAudio.currentSrc || '';
-  if (curr && sameTrack(curr, url)) return; // already on this track
-
-  // Try dual-channel crossfade
-  idleAudio.src = url;
-  idleAudio.volume = 0.0;
-
-  let idlePlayable = true;
-  try { await idleAudio.play(); } catch (e) { idlePlayable = false; }
-
-  if (!idlePlayable) {
-    // Fallback: single-channel hard switch (no crossfade, but guaranteed to start)
-    activeAudio.src = url;
-    activeAudio.volume = 0.35;
-    try { await activeAudio.play(); } catch {}
-    return;
-  }
-
-  const FADE_MS = immediate ? 0 : 1500;
-  const start = performance.now();
-  const startVol = activeAudio.volume ?? 0.35;
-  const targetVol = 0.35;
-
-  function step(now){
-    const t = Math.min(1, (now - start)/FADE_MS || 1);
-    activeAudio.volume = startVol * (1 - t);
-    idleAudio.volume   = targetVol * t;
-    if (t < 1) { requestAnimationFrame(step); }
-    else {
-      activeAudio.pause();
-      // swap channels
-      const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp;
+    const FADE_MS = immediate ? 0 : 1500;
+    const start = performance.now();
+    const startVol = activeAudio.volume ?? 0.35;
+    const targetVol = 0.35;
+    function step(now){
+      const t = Math.min(1, (now - start)/FADE_MS || 1);
+      activeAudio.volume = startVol * (1 - t);
+      idleAudio.volume   = targetVol * t;
+      if (t < 1) requestAnimationFrame(step);
+      else { activeAudio.pause(); const tmp = activeAudio; activeAudio = idleAudio; idleAudio = tmp; }
     }
+    requestAnimationFrame(step);
   }
-  requestAnimationFrame(step);
-}
-
-
   async function playTrackForAlt(alt, {immediate=false}={}){
     const url = currentTrackURLForAlt(alt);
     await crossfadeTo(url, immediate);
     musicBtn.textContent='Music ON';
     musicBtn.classList.add('toggled');
   }
-
   function toggleMusic(){
-  musicEnabled = !musicEnabled;
-  if (musicEnabled){
-    if (!activeAudio.currentSrc) {
-      // If no track yet, lock to the current tier’s track
-      const url = currentTrackURLForAlt(altitude);
-      activeAudio.src = url;
+    musicEnabled = !musicEnabled;
+    if (musicEnabled){
+      if (!activeAudio.currentSrc) {
+        const url = currentTrackURLForAlt(altitude);
+        activeAudio.src = url;
+      }
+      activeAudio.volume = 0.35;
+      activeAudio.play().catch(()=>{});
+      musicBtn.textContent='Music ON';
+      musicBtn.classList.add('toggled');
+    } else {
+      activeAudio.pause(); idleAudio.pause();
+      musicBtn.textContent='Music OFF';
+      musicBtn.classList.remove('toggled');
     }
-    activeAudio.volume = 0.35;
-    activeAudio.play().catch(e => console.warn('toggle play blocked', e));
-    musicBtn.textContent='Music ON';
-    musicBtn.classList.add('toggled');
-  } else {
-    activeAudio.pause(); idleAudio.pause();
-    musicBtn.textContent='Music OFF';
-    musicBtn.classList.remove('toggled');
+    saveSettings();
   }
-  saveSettings();
-}
 
+    function desiredAmbientURL(){
+  return boss.active ? MUSIC_BOSS : currentTrackURLForAlt(altitude);
+}
+function ensureAmbientTrack(){
+  if (!musicEnabled) return;
+  const want = desiredAmbientURL();
+  const curr = activeAudio.currentSrc || '';
+  try{
+    const pa = new URL(curr, location.href).pathname.split('/').pop();
+    const pb = new URL(want, location.href).pathname.split('/').pop();
+    if (pa !== pb) crossfadeTo(want);
+  }catch{
+    if (curr !== want) crossfadeTo(want);
+  }
+}
 
   // ================== Game lifecycle & UI ==================
   let player;
@@ -1069,43 +1411,15 @@ async function crossfadeTo(url, immediate=false){
   const heartsEl = document.getElementById('hearts');
   const pausedTag = document.getElementById('pausedTag');
 
-  // basic audio event logs (active channel only)
-  function reportAudio(el){
-    const ns = ['EMPTY','IDLE','LOADING','NO_SOURCE'][el.networkState] || el.networkState;
-    const rs = ['HAVE_NOTHING','HAVE_METADATA','HAVE_CURRENT_DATA','HAVE_FUTURE_DATA','HAVE_ENOUGH_DATA'][el.readyState] || el.readyState;
-    console.log('Audio state:', {currentSrc: el.currentSrc, networkState: ns, readyState: rs, error: el.error});
-  }
-  ['error','loadedmetadata','canplay','canplaythrough','play','pause','stalled'].forEach(ev =>
-    musicA.addEventListener(ev, () => { console.log('[audio A]', ev); reportAudio(musicA); })
-  );
-
   startBtn.onclick = async () => {
-  initAudio();
-  try { await ac?.resume(); } catch {}
+    initAudio(); try { await ac?.resume(); } catch {}
+    startGame();
 
-  startGame();
-
-  // Play the correct track for the current tier immediately (single element).
-  const firstURL = currentTrackURLForAlt(altitude);
-  activeAudio.src = firstURL;
-  activeAudio.volume = 0.35;
-
-  musicEnabled = true;
-  musicBtn.textContent = 'Music ON';
-  musicBtn.classList.add('toggled');
-
-  try {
-    await activeAudio.play(); // direct, user-gesture playback
-  } catch (err) {
-    console.warn('Autoplay blocked on first play:', err);
-    musicEnabled = false;
-    musicBtn.textContent = 'Music OFF';
-    musicBtn.classList.remove('toggled');
-    toast('Click “Music ON” to start audio', 1600);
-  }
-};
-
-
+    const firstURL = currentTrackURLForAlt(altitude);
+    activeAudio.src = firstURL; activeAudio.volume = 0.35;
+    musicEnabled = true; musicBtn.textContent = 'Music ON'; musicBtn.classList.add('toggled');
+    try { await activeAudio.play(); } catch { musicEnabled = false; musicBtn.textContent = 'Music OFF'; musicBtn.classList.remove('toggled'); toast('Click “Music ON” to start audio', 1600); }
+  };
   pauseBtn.onclick = togglePause;
   musicBtn.onclick = toggleMusic;
   nightBtn.onclick = ()=>setNight(!isNight);
@@ -1153,7 +1467,12 @@ async function crossfadeTo(url, immediate=false){
 
     if (paused){ drawFrame(); return; }
 
-    // Move moving platforms; compute dx/dy for carry/crush safety
+    // Boss trigger
+    if (!boss.active && (player.dist/U) >= boss.nextAt){
+      boss.start();
+    }
+
+    // Move moving platforms
     for (const p of platforms){
       p.dx = 0; p.dy = 0;
       if (p.moving){
@@ -1161,7 +1480,6 @@ async function crossfadeTo(url, immediate=false){
         const tt = performance.now()/1000 * p.moving.sp + p.moving.ph;
         const nx = p.x0 + (p.moving.ax ? Math.sin(tt)*p.moving.amp : 0);
         const ny = p.y0 + (p.moving.ay ? Math.sin(tt)*p.moving.amp : 0);
-        // crush-prevention vs other solids
         let ok = true;
         for (const q of platforms){
           if (q === p || !q.solid) continue;
@@ -1177,10 +1495,11 @@ async function crossfadeTo(url, immediate=false){
     cam.x += (player.pos.x - W*0.35 - cam.x)*0.06;
     cam.y += (player.pos.y - H*0.58 - cam.y)*0.05;
 
-    // generate more
+    // generate more (suppressed during boss only for enemies/items/traps)
     while (genX - cam.x < W*1.2) generateChunk();
 
     player.update();
+    boss.update();
 
     // fall-death safeguard
     const FALL_TILES = 12;
@@ -1194,26 +1513,32 @@ async function crossfadeTo(url, immediate=false){
     for (const f of flyers)  f.update();
     for (const b of bullets) b.update();
 
-    // traps update (flame telegraph)
+    // flames: simple 4-frame loop
     for (const t2 of traps) if (t2.type==='flame'){
-      t2.t += 0.02;
-      const s = Math.sin(t2.t*Math.PI*2*1.2);
-      t2.warn = (s > 0.1);
-      t2.active = (s > 0.28);
+      t2.t += 0.15;
+      t2.frame = Math.floor(t2.t) % 4;
     }
 
+    // Ambient birds spawn (only at tiers 0/1/2)
+    if (altitude>=0 && Math.random()<0.006 && !boss.active){
+      birds.push(new AmbientBird(Math.random()<0.5?'L':'R'));
+    }
+    for (let i=birds.length-1;i>=0;i--){ const b=birds[i]; b.update(); if (b.life<=0) birds.splice(i,1); }
+
     // ladders: enter on overlap + input
-    for (const L of ladders){
-      const r = new Rect(L.x, L.y, L.w, L.h);
-      if (!player.onLadder && player.rect().intersects(r)){
-        if (L.dir === 'link'){
-          if (input.up || input.down){
+    if (!boss.active) {
+      for (const L of ladders){
+        const r = new Rect(L.x, L.y, L.w, L.h);
+        if (!player.onLadder && player.rect().intersects(r)){
+          if (L.dir === 'link'){
+            if (input.up || input.down){
+              player.onLadder = L; player.ladderT = 0;
+              player.ladderDir = input.down ? 'down' : 'up';
+            }
+          } else if ((L.dir === 'up' && input.up) || (L.dir === 'down' && input.down)){
             player.onLadder = L; player.ladderT = 0;
-            player.ladderDir = input.down ? 'down' : 'up';
+            player.ladderDir = L.dir;
           }
-        } else if ((L.dir === 'up' && input.up) || (L.dir === 'down' && input.down)){
-          player.onLadder = L; player.ladderT = 0;
-          player.ladderDir = L.dir;
         }
       }
     }
@@ -1238,33 +1563,56 @@ async function crossfadeTo(url, immediate=false){
       const sx=toScreenX(t.x), sy=toScreenY(t.y);
       if (sx+t.w<-100||sx>W+100) continue;
       if (t.type==='saw'){
-        t.t += 0.08;
-        ctx.save(); ctx.translate((sx+t.w/2)|0,(sy+t.h/2)|0); ctx.rotate(t.t);
-        ctx.fillStyle='#ffd3aa'; ctx.beginPath();
-        for(let i=0;i<12;i++){ const a=(i/12)*Math.PI*2; ctx.moveTo(0,0); ctx.lineTo(Math.cos(a)*t.w*0.55, Math.sin(a)*t.h*0.55); }
-        ctx.closePath(); ctx.fill(); ctx.restore();
-      } else if (t.type==='flame'){
-        // base
-        ctx.fillStyle = '#6b3a2a'; ctx.fillRect(sx, sy+t.h-4*DPR, t.w, 4*DPR);
-        // glow/warn
-        if (t.warn && !t.active){
-          ctx.globalAlpha = 0.35; ctx.fillStyle='#ffb55a'; ctx.fillRect(sx, sy, t.w, t.h*0.8); ctx.globalAlpha = 1;
-        }
-        // particles when active
-        if (t.active){
-          for(let i=0;i<12;i++){
-            const px=sx+t.w*rand(0.2,0.8), py=sy+t.h*rand(0.2,0.9);
-            const sz=irand(1,3)*DPR;
-            ctx.fillStyle=['#ffdca8','#ff9a3e','#f2522e'][irand(0,3)];
-            ctx.fillRect(px, py - rand(2,8)*DPR, sz, sz);
-          }
-        }
-      } else {
-        ctx.fillStyle='#c7b8ff';
-        const teeth=Math.max(2,Math.floor(t.w/(8*DPR)));
-        for(let i=0;i<teeth;i++){ const x=sx+(i/teeth)*t.w; ctx.beginPath(); ctx.moveTo(x,sy+t.h); ctx.lineTo(x+t.w/teeth/2,sy); ctx.lineTo(x+t.w/teeth,sy+t.h); ctx.fill(); }
-      }
+  t.t += 0.08;
+  ctx.save();
+  ctx.translate((sx+t.w/2)|0,(sy+t.h/2)|0);
+  ctx.rotate(t.t);
+  ctx.fillStyle='#ffd3aa';
+  ctx.beginPath();
+  for(let i=0;i<12;i++){
+    const a=(i/12)*Math.PI*2;
+    ctx.moveTo(0,0);
+    ctx.lineTo(Math.cos(a)*t.w*0.55, Math.sin(a)*t.h*0.55);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+
+} else if (t.type==='flame'){
+  // burner base
+  const baseH = 4*DPR;
+  ctx.fillStyle = palFlame.d;
+  ctx.fillRect(sx, sy+t.h-baseH, t.w, baseH);
+
+  // 4-frame pixel flame (always visible)
+  const f = FLAME_FRAMES[t.frame|0];
+  const scale = Math.min( t.w/(f[0].length), (t.h-baseH)/f.length ) * 1.1;
+  const fx = sx + (t.w - f[0].length*scale)/2;
+  const fy = sy + (t.h - baseH - f.length*scale);
+
+  for(let j=0;j<f.length;j++){
+    const row=f[j];
+    for(let i=0;i<row.length;i++){
+      const c=row[i]; if(c==='.') continue;
+      ctx.fillStyle=palFlame[c]||'#fff';
+      const px = (fx+i*scale)|0, py = (fy+j*scale)|0, sz = Math.max(1,scale)|0;
+      ctx.fillRect(px, py, sz, sz);
     }
+  }
+
+  } else {
+    // spikes
+      ctx.fillStyle='#c7b8ff';
+      const teeth=Math.max(2,Math.floor(t.w/(8*DPR)));
+    for(let i=0;i<teeth;i++){
+      const x2=sx+(i/teeth)*t.w;
+      ctx.beginPath();
+      ctx.moveTo(x2,sy+t.h); ctx.lineTo(x2+t.w/teeth/2,sy); ctx.lineTo(x2+t.w/teeth,sy+t.h);
+      ctx.fill();
+    }
+  }
+}
+    // ambient birds
+    if (altitude>=0){ for (const b of birds) b.draw(); }
 
     function drawCoin(c){
       c.t += c.spin || 0.1;
@@ -1318,7 +1666,6 @@ async function crossfadeTo(url, immediate=false){
       ctx.fillRect(sx+2*DPR, sy+h.h/2-2*DPR, h.w-4*DPR, 4*DPR);
     }
 
-    // coins/gems/enemies/bullets/player
     for (const c of coins) drawCoin(c);
 
     for (const g of gems){
@@ -1331,6 +1678,9 @@ async function crossfadeTo(url, immediate=false){
     for(const e of enemies) if(e.alive) e.draw();
     for(const f of flyers)  if(f.alive) f.draw();
     for(const b of bullets) b.draw();
+
+    if (boss.active) boss.draw();
+
     player.draw();
   }
 
@@ -1346,12 +1696,13 @@ async function crossfadeTo(url, immediate=false){
     renderHearts(player.lives);
 
     if (debug){
-      ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(10,10,300,94);
+      ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(10,10,360,112);
       ctx.fillStyle='#e8f0ff'; ctx.font=`${12*DPR}px monospace`;
       ctx.fillText(`FPS: ${fps.toFixed(0)}`, 20, 28);
       ctx.fillText(`Enemies: ${enemies.length} + Fliers: ${flyers.length}`, 20, 44);
       ctx.fillText(`Bullets: ${bullets.length} • Alt: ${altitude} (${biome})`, 20, 60);
       ctx.fillText(`Tier win: ${nextTierWinStart}|${nextTierWinEnd} • seen=${spawnedTierLadderThisWindow}`, 20, 76);
+      ctx.fillText(`Boss@ ${boss.nextAt} • Active=${boss.active}`, 20, 92);
     }
   }
 
